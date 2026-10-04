@@ -37,6 +37,19 @@ const initialFiles = [
   { name: 'agent-return.pptx', type: 'PPTX', status: 'Restore available', content: ['Project owner: [[T_001]]', 'Project: [[T_002]]'], heading: 'Returned presentation' },
 ];
 
+const RECENT_PROJECTS_KEY = 'blot-recent-projects';
+
+const readRecentProjects = () => {
+  try {
+    const projects = JSON.parse(localStorage.getItem(RECENT_PROJECTS_KEY) || '[]');
+    return Array.isArray(projects)
+      ? projects.filter((project) => typeof project?.name === 'string' && typeof project?.directory === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+};
+
 const countMatches = (text, value) => {
   const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return (text.match(new RegExp(escaped, 'gi')) || []).length;
@@ -106,6 +119,7 @@ export default function App() {
   const [nerModelStatus, setNerModelStatus] = useState(null);
   const [minilmModelStatus, setMinilmModelStatus] = useState(null);
   const [currentProject, setCurrentProject] = useState(null);
+  const [recentProjects, setRecentProjects] = useState(readRecentProjects);
   const [projectBusy, setProjectBusy] = useState(false);
   const [exportPreview, setExportPreview] = useState(null);
   const [exportAcknowledged, setExportAcknowledged] = useState(false);
@@ -429,8 +443,8 @@ export default function App() {
     });
   };
 
-  const loadProjectDocumentCandidates = async (documentId, manualTerms = []) => {
-    if (!projectDirectory || !localToken) return false;
+  const loadProjectDocumentCandidates = async (documentId, manualTerms = [], directory = projectDirectory) => {
+    if (!directory || !localToken) return false;
     setExportPreview(null);
     setFiles((current) => current.map((file) => (
       file.id === documentId ? { ...file, candidateLoading: true, candidateError: '' } : file
@@ -439,7 +453,7 @@ export default function App() {
       const response = await fetch('/api/projects/document-candidates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
-        body: JSON.stringify({ directory: projectDirectory, document_id: documentId, manual_terms: manualTerms }),
+        body: JSON.stringify({ directory, document_id: documentId, manual_terms: manualTerms }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not analyze supported text');
@@ -530,8 +544,8 @@ export default function App() {
     }
   };
 
-  const loadProjectDocumentPreview = async (documentId, versionId, versionKind) => {
-    if (!projectDirectory || !localToken) return;
+  const loadProjectDocumentPreview = async (documentId, versionId, versionKind, directory = projectDirectory) => {
+    if (!directory || !localToken) return;
     setFiles((current) => current.map((file) => (
       file.id === documentId ? { ...file, previewLoading: true } : file
     )));
@@ -539,7 +553,7 @@ export default function App() {
       const response = await fetch('/api/projects/document-preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
-        body: JSON.stringify({ directory: projectDirectory, document_id: documentId, version_id: versionId || undefined }),
+        body: JSON.stringify({ directory, document_id: documentId, version_id: versionId || undefined }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not parse this document for preview');
@@ -584,7 +598,7 @@ export default function App() {
           }
           : file
       )));
-      if ((selectedVersion?.kind || 'original') === 'original') await loadProjectDocumentCandidates(documentId);
+      if ((selectedVersion?.kind || 'original') === 'original') await loadProjectDocumentCandidates(documentId, [], directory);
     } catch (error) {
       setFiles((current) => current.map((file) => (
         file.id === documentId
@@ -1051,6 +1065,7 @@ export default function App() {
         heading: `${document.name} · restored project`,
         isProjectDocument: true,
       }));
+      rememberProject(data, backupDirectory);
       setCurrentProject(data);
       setProjectDirectory(backupDirectory);
       setFiles(restoredDocuments);
@@ -1058,7 +1073,7 @@ export default function App() {
       setSectionIndex(0);
       setBackupDialog(null);
       setBackupPassphrase('');
-      if (restoredDocuments[0]) await loadProjectDocumentPreview(restoredDocuments[0].id);
+      if (restoredDocuments[0]) await loadProjectDocumentPreview(restoredDocuments[0].id, restoredDocuments[0].versionId, 'original', backupDirectory);
       setToast(`Restored encrypted project “${data.name}” to this computer`);
     } catch (error) {
       setToast(error.message || 'Could not restore the encrypted backup');
@@ -1069,7 +1084,7 @@ export default function App() {
 
   const chooseProjectDirectory = async () => {
     if (!localToken) {
-      setToast('Start the local service before choosing a project folder');
+      setToast('Run npm run dev:app to start the local services before choosing a folder');
       return;
     }
     setProjectBusy(true);
@@ -1118,6 +1133,7 @@ export default function App() {
         heading: `${document.name} · saved original`,
         isProjectDocument: true,
       }));
+      rememberProject(data, projectDirectory);
       setCurrentProject(data);
       setFiles(savedDocuments);
       setActiveName(savedDocuments[0]?.id || '');
@@ -1129,6 +1145,66 @@ export default function App() {
       setToast(`${projectAction === 'create' ? 'Created' : 'Opened'} local project “${data.name}”`);
     } catch (error) {
       setToast(error.message || 'Could not open this project');
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
+  const rememberProject = (project, directory) => {
+    if (!directory) return;
+    const recent = {
+      id: project.id || directory,
+      name: project.name || 'Local workspace',
+      directory,
+    };
+    const updated = [recent, ...recentProjects.filter((item) => item.directory !== directory)];
+    setRecentProjects(updated);
+    try {
+      localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(updated));
+    } catch { /* Recent workspace shortcuts are optional when browser storage is unavailable. */ }
+  };
+
+  const openRecentProject = async (recent) => {
+    if (!localToken || projectBusy) return;
+    setProjectBusy(true);
+    setProjectDirectory(recent.directory);
+    try {
+      const response = await fetch('/api/projects/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: recent.directory }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not open this workspace');
+      const savedDocuments = (data.documents || []).map((document) => ({
+        id: document.id,
+        versionId: document.versionId,
+        versions: document.versions || [],
+        selectedVersionId: document.versionId,
+        name: document.name,
+        type: document.type,
+        status: 'Saved original · v01',
+        content: ['Loading a local parsed preview…'],
+        rawText: '',
+        heading: `${document.name} · saved original`,
+        isProjectDocument: true,
+      }));
+      rememberProject(data, recent.directory);
+      setCurrentProject(data);
+      setFiles(savedDocuments);
+      setActiveName(savedDocuments[0]?.id || '');
+      setSectionIndex(0);
+      setDenseText(false);
+      setView('preview');
+      setUndo(null);
+      setExportPreview(null);
+      setRestorePreviewData(null);
+      if (savedDocuments[0]) {
+        await loadProjectDocumentPreview(savedDocuments[0].id, savedDocuments[0].versionId, 'original', recent.directory);
+      }
+      setToast(`Opened local workspace “${data.name}”`);
+    } catch (error) {
+      setToast(error.message || 'Could not open this workspace');
     } finally {
       setProjectBusy(false);
     }
@@ -1169,6 +1245,7 @@ export default function App() {
         heading: `${document.name} · saved project`,
         isProjectDocument: true,
       }));
+      rememberProject(data, projectDirectory);
       setCurrentProject(data);
       setFiles(savedDocuments);
       setActiveName(savedDocuments[0]?.id || '');
@@ -1250,8 +1327,8 @@ export default function App() {
       <aside className="sidebar" data-od-id="sidebar">
         <div className="brand-row"><div className="brand-mark" aria-hidden="true">B</div><div><div className="brand-name">Blot</div><div className="brand-sub">private document workspace</div></div></div>
         <div className="side-section"><div className="side-label">Workspace</div><button className="side-link active" onClick={() => setToast('Review queue opened')}><span className="side-icon">◈</span> Review queue</button><button className="side-link" onClick={() => setToast('Showing all project files')}><span className="side-icon">□</span> All files <span style={{ marginLeft: 'auto', fontSize: 11 }}>{files.length}</span></button><button className="side-link" onClick={() => setToast('Activity is up to date')}><span className="side-icon">↺</span> Activity</button></div>
-        <div className="side-section"><div className="side-label">Projects</div><button className={`side-link ${!currentProject ? 'active' : ''}`} onClick={() => setToast('Cedar briefing is the unsaved demo workspace')}><span className="side-icon">▣</span> Cedar briefing</button><button className="side-link" onClick={() => setToast('Launch notes is a demo project')}><span className="side-icon">▣</span> Launch notes</button>{currentProject && <button className="side-link active" title={currentProject.name}><span className="side-icon">▣</span>{currentProject.name}</button>}<button className="side-link" onClick={showProjectDialog}><span className="side-icon">＋</span> Add or open project</button></div>
-        <div className="side-spacer" /><div className="local-badge"><span className="status-dot" style={{ background: serviceAvailable ? 'var(--success)' : 'var(--warn)' }} /><span><strong style={{ color: 'var(--accent-on)' }}>{serviceAvailable ? 'Local service ready' : 'UI preview mode'}</strong><br />{serviceAvailable ? 'Document content stays on this computer.' : 'Start FastAPI for local projects.'}</span></div>
+        <div className="side-section"><div className="side-label">Recent workspaces</div>{recentProjects.map((project) => <button key={project.directory} className={`side-link ${currentProject && project.directory === projectDirectory ? 'active' : ''}`} title={project.directory} disabled={!serviceAvailable || projectBusy} onClick={() => openRecentProject(project)}><span className="side-icon">▣</span><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{project.name}</span></button>)}{recentProjects.length === 0 && <p style={{ margin: '0 10px 8px', color: 'color-mix(in oklch, var(--accent-on) 58%, transparent)', fontSize: 12 }}>Your saved workspaces will appear here.</p>}<button className="side-link" onClick={showProjectDialog}><span className="side-icon">＋</span> Add or open workspace</button></div>
+        <div className="side-spacer" /><div className="local-badge"><span className="status-dot" style={{ background: serviceAvailable ? 'var(--success)' : 'var(--warn)' }} /><span><strong style={{ color: 'var(--accent-on)' }}>{serviceAvailable ? 'Local service ready' : 'UI preview mode'}</strong><br />{serviceAvailable ? 'Document content stays on this computer.' : 'Run npm run dev:app for local projects.'}</span></div>
       </aside>
       <main className="main">
         <header className="topbar"><div className="crumbs"><span>{currentProject?.name || 'Cedar briefing · demo'}</span><span>/</span><strong>{projectHasNoDocuments ? 'No documents' : activeFile.name}</strong></div><div className="top-actions"><button className="text-btn" onClick={() => { setBackupDialog(currentProject ? 'create' : 'restore'); setBackupPassphrase(''); }}>Encrypted backup</button><button className="icon-btn" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀' : '☾'}</button><button className="icon-btn" aria-label="Open local settings" onClick={() => setToast('Local settings are available in the service configuration')}>•••</button><button className="primary-btn" disabled={currentProject && projectBusy} onClick={() => currentProject ? importProjectDocuments() : setModalOpen(true)}>{projectBusy ? 'Working…' : 'Import file'}</button></div></header>
@@ -1365,7 +1442,7 @@ export default function App() {
       {termContextMenu?.fileName === activeName && view === 'preview' && <div className="term-context-menu" data-term-context-menu role="menu" aria-label="Highlighted word actions" style={{ left: termContextMenu.x, top: termContextMenu.y }}><button type="button" role="menuitem" onClick={() => applyTermDecision(termContextMenu.target, 'included')}>Include</button><button type="button" role="menuitem" onClick={() => applyTermDecision(termContextMenu.target, 'excluded')}>Exclude</button></div>}
       {toast && <div className="toast show" role="status" aria-live="polite">{toast}</div>}
       {modalOpen && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget) setModalOpen(false); }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">Import into Cedar briefing</h2><p>Files stay on this computer. This browser preview reads TXT, MD, and CSV. Office text extraction requires the local document engine.</p><label className="drop-zone"><strong>Choose a local file</strong><span>Up to 100 MB · no upload or cloud connection</span><input type="file" accept=".txt,.md,.csv,text/plain,text/csv" onChange={handleImport} aria-label="Choose a local text file" /></label><div className="modal-actions"><button className="text-btn" onClick={() => setModalOpen(false)}>Cancel</button></div></div></div>}
-      {projectModalOpen && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !projectBusy) setProjectModalOpen(false); }}><form className="modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title" onSubmit={submitProject}><h2 id="project-modal-title">Local project folder</h2><p>Create a new workspace or open an existing Blot project. The folder and encrypted project state stay on this computer.</p><div className="view-switch" role="tablist" aria-label="Project action"><button type="button" className={projectAction === 'create' ? 'active' : ''} role="tab" aria-selected={projectAction === 'create'} onClick={() => setProjectAction('create')}>Create</button><button type="button" className={projectAction === 'open' ? 'active' : ''} role="tab" aria-selected={projectAction === 'open'} onClick={() => setProjectAction('open')}>Open existing</button></div>{projectAction === 'create' && <label className="project-field">Project name<input value={projectName} onChange={(event) => setProjectName(event.target.value)} required maxLength={100} autoFocus /></label>}<label className="project-field">Project folder<input value={projectDirectory} onChange={(event) => setProjectDirectory(event.target.value)} required placeholder="Choose a local folder" /></label><button className="text-btn" type="button" onClick={chooseProjectDirectory} disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : 'Browse on this computer'}</button>{!serviceAvailable && <p role="status">Start FastAPI to create or open a local project.</p>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setProjectModalOpen(false)} disabled={projectBusy}>Cancel</button><button className="primary-btn" type="submit" disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : projectAction === 'create' ? 'Create project' : 'Open project'}</button></div></form></div>}
+      {projectModalOpen && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !projectBusy) setProjectModalOpen(false); }}><form className="modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title" onSubmit={submitProject}><h2 id="project-modal-title">Local project folder</h2><p>Create a new workspace or open an existing Blot project. The folder and encrypted project state stay on this computer.</p><div className="view-switch" role="tablist" aria-label="Project action"><button type="button" className={projectAction === 'create' ? 'active' : ''} role="tab" aria-selected={projectAction === 'create'} onClick={() => setProjectAction('create')}>Create</button><button type="button" className={projectAction === 'open' ? 'active' : ''} role="tab" aria-selected={projectAction === 'open'} onClick={() => setProjectAction('open')}>Open existing</button></div>{projectAction === 'create' && <label className="project-field">Project name<input value={projectName} onChange={(event) => setProjectName(event.target.value)} required maxLength={100} autoFocus /></label>}<label className="project-field">Project folder<input value={projectDirectory} onChange={(event) => setProjectDirectory(event.target.value)} required placeholder="Choose a local folder" /></label><button className="text-btn" type="button" onClick={chooseProjectDirectory} disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : 'Browse on this computer'}</button>{!serviceAvailable && <p role="status">Run npm run dev:app to start the local services.</p>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setProjectModalOpen(false)} disabled={projectBusy}>Cancel</button><button className="primary-btn" type="submit" disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : projectAction === 'create' ? 'Create project' : 'Open project'}</button></div></form></div>}
     </div>
   );
 }

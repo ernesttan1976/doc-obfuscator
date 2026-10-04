@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --open /obfuscation-workspace.html",
+    "dev:app": "node scripts/dev.mjs",
     "api:dev": "uv run python -m backend.app",
     "start:local": "uv run python -m backend.app",
     "build": "vite build",

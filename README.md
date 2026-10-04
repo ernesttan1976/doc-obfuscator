@@ -13,18 +13,19 @@ Vite opens the preserved workspace at `http://localhost:5173/obfuscation-workspa
 
 ## Run the local API and project storage
 
-In one terminal, create the Python environment and start FastAPI:
+For a one-terminal development setup, install dependencies once and then start both services together:
 
 ```bash
 uv sync --extra dev
-uv run python -m backend.app
+npm ci
+npm run dev:app
 ```
+
+The command starts the local API and Vite, then opens the app in your browser. Press Ctrl+C to stop the services it started. If the API is already running on port 8765, it reuses it and never kills unrelated processes. To run the services separately, start FastAPI with `uv run python -m backend.app` and Vite with `npm run dev` in another terminal. Vite proxies `/api` to the loopback-only API. It provides protected project/version/export/restoration/backup endpoints, explicit local-model status/download/cancel endpoints, native project/document/backup pickers, and an idle session lock.
 
 To install the optional local model runtime, run `uv sync --extra models`. This installs Python packages only; NER and MiniLM weights/tokenizer assets remain absent until explicitly downloaded from their controls in the saved-document review panel.
 
-In a second terminal, run `npm run dev`. Vite proxies `/api` to the loopback-only service at `127.0.0.1:8765`. The API provides protected project/version/export/restoration/backup endpoints, explicit local-model status/download/cancel endpoints, native project/document/backup pickers, and an idle session lock.
-
-Use **Add or open project** in the sidebar to create or open a project. Select **Import file** to choose DOCX, PPTX, TXT, MD, CSV, or XLSX sources; each file is copied read-only into `.blot/originals/` and recorded as an original version in `.blot/project.sqlite3`. Files over 100 MB are rejected. Project graph/map state uses AES-GCM encryption with its random data key in the OS credential store.
+Use **Add or open workspace** in the sidebar to create or open a project. Previously opened workspaces are remembered in this browser and appear under **Recent workspaces** for one-click reopening. Select **Import file** to choose DOCX, PPTX, TXT, MD, CSV, or XLSX sources; each file is copied read-only into `.blot/originals/` and recorded as an original version in `.blot/project.sqlite3`. Files over 100 MB are rejected. Project graph/map state uses AES-GCM encryption with its random data key in the OS credential store.
 
 Opening a saved TXT or MD shows a local text preview with UTF-8/UTF-16 encoding and line-ending metadata. CSV previews retain the detected delimiter, quoting, rows, and columns; ambiguous or inconsistent dialects are rejected. XLSX previews read literal shared-string and inline-string cells across worksheets, preserve formulas and workbook parts, and flag detected unsupported text-bearing parts. DOCX/PPTX previews scan WordprocessingML and DrawingML paragraph text across package XML parts, including split runs, tables, headers/comments, slides, and notes; exact-text adapter replacements preserve run formatting and leave untouched package parts intact. Bounded coverage reports list examined XML parts, skipped non-XML parts, and detected unsupported parts; saved-document review surfaces these warnings and per-format coverage counts beside the preview, plus bounded PPTX slide/DOCX text-part navigation and a dense text mode. DOCX page layout is not inferred from raw package XML. Images/OCR, macros, embedded binary content, external relationship targets, document metadata, and text outside the supported paragraph XML elements are not processed. Candidate analysis always uses local patterns for email-like values, phone-like values, dates, identifiers, and capitalized phrases; once installed, the optional GLiNER model adds bounded entity suggestions with labels and confidence. MiniLM encodes bounded nearby context after masking each candidate mention, then offers cosine-scored contextual suggestions. Both Apache-2.0 artifact sets are pinned to immutable revisions and verified before local loading; model outputs and RapidFuzz edges remain suggestions until the user confirms a group. The saved-document UI supports model acquisition, review breadth, manual phrase selection, Include/Exclude with Undo, review-status counts, proposal review, and explicit group operations. Candidate data is stored in the encrypted project graph; contextual text and embeddings are not persisted. Obfuscation, export, and product restoration remain pending. Previews are bounded; placeholder-like text is counted without exposing it in diagnostics. Demo documents stay labeled as unsaved.
 
@@ -81,3 +82,19 @@ npm run preview
 ```
 
 Stages 6–9 now include connected review/export/restoration workflows, encrypted backup/restore, idle locking, resumable model artifact downloads, and macOS/Windows launch/setup scripts. Stage 10 has a synthetic-data end-to-end acceptance foundation. Real OS credential prompts and installation, model inference/resource limits, browser keyboard/responsive acceptance, human pilot, and 100 MB performance gates remain before release; see `IMPLEMENTATION_PLAN.md`.
+
+
+
+
+## Backend
+pids=$(lsof -tiTCP:8765 -sTCP:LISTEN)
+if [ -n "$pids" ]; then
+  ps -p "$pids" -o pid=,command=
+  kill $pids
+  while lsof -tiTCP:8765 -sTCP:LISTEN >/dev/null 2>&1; do sleep 1; done
+fi
+uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8765 --log-level info --access-log
+
+
+## Frontend
+npm run dev
