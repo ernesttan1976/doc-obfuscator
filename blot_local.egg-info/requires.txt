@@ -1,4 +1,5 @@
 cryptography<47,>=44
+defusedxml<0.8,>=0.7.1
 fastapi==0.142.2
 keyring<27,>=25
 uvicorn==0.54.0

@@ -1,5 +1,6 @@
 import os
 import secrets
+import sqlite3
 from types import SimpleNamespace
 
 import httpx
@@ -177,6 +178,48 @@ def test_project_import_copies_an_immutable_original_and_records_version(tmp_pat
         assert original.stat().st_mode & 0o777 == 0o400
 
 
+def test_project_preview_parses_saved_text_without_changing_the_original(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "notes.md"
+    root.mkdir()
+    source.write_bytes(b"# Alex Tan\r\nProject Cedar\r\n")
+    service = ProjectService(MemoryKeyStore())
+    service.create(root, "Project")
+    imported = service.import_documents(root, [source])[0]
+    stored_path = root / ".blot" / "originals" / imported.document_id / "original.md"
+    original_bytes = stored_path.read_bytes()
+
+    preview = service.preview_document(root, imported.document_id)
+
+    assert preview["format"] == "MD"
+    assert preview["encoding"] == "utf-8"
+    assert preview["lineEndings"] == "crlf"
+    assert preview["text"] == "# Alex Tan\r\nProject Cedar\r\n"
+    assert stored_path.read_bytes() == original_bytes
+
+
+def test_project_preview_rejects_paths_that_escape_originals(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "notes.txt"
+    root.mkdir()
+    source.write_text("safe text", encoding="utf-8")
+    service = ProjectService(MemoryKeyStore())
+    service.create(root, "Project")
+    imported = service.import_documents(root, [source])[0]
+    connection = sqlite3.connect(root / ".blot" / "project.sqlite3")
+    try:
+        connection.execute(
+            "UPDATE documents SET original_path = ? WHERE id = ?",
+            ("../../notes.txt", imported.document_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(ProjectError, match="path is invalid"):
+        service.preview_document(root, imported.document_id)
+
+
 def test_project_import_rejects_unsupported_files_without_copying(tmp_path):
     root = tmp_path / "project"
     source = tmp_path / "script.py"
@@ -256,6 +299,51 @@ async def test_project_document_import_is_token_protected_and_returns_saved_vers
     assert imported.status_code == 200
     assert imported.json()["documents"][0]["status"] == "original"
     assert opened.json()["documents"] == imported.json()["documents"]
+
+
+@pytest.mark.anyio
+async def test_document_preview_is_token_protected_and_returns_parsed_content(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "brief.md"
+    office_source = tmp_path / "brief.docx"
+    root.mkdir()
+    source.write_bytes(b"Alex Tan\r\nProject Cedar\r\n")
+    office_source.write_bytes(b"Stage 4 adapter pending")
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        headers = {"X-Local-App-Token": app.state.local_token}
+        await client.post(
+            "/api/projects",
+            json={"name": "Project", "directory": str(root)},
+            headers=headers,
+        )
+        imported = await client.post(
+            "/api/projects/documents",
+            json={"directory": str(root), "files": [str(source)]},
+            headers=headers,
+        )
+        imported_office = await client.post(
+            "/api/projects/documents",
+            json={"directory": str(root), "files": [str(office_source)]},
+            headers=headers,
+        )
+        document_id = imported.json()["documents"][0]["id"]
+        payload = {"directory": str(root), "document_id": document_id}
+        denied = await client.post("/api/projects/document-preview", json=payload)
+        preview = await client.post("/api/projects/document-preview", json=payload, headers=headers)
+        unsupported_id = imported_office.json()["documents"][0]["id"]
+        unsupported = await client.post(
+            "/api/projects/document-preview",
+            json={"directory": str(root), "document_id": unsupported_id},
+            headers=headers,
+        )
+
+    assert denied.status_code == 401
+    assert preview.status_code == 200
+    assert preview.json()["format"] == "MD"
+    assert preview.json()["text"] == "Alex Tan\r\nProject Cedar\r\n"
+    assert unsupported.status_code == 422
+    assert unsupported.json()["detail"] == "This document format is not supported by the Stage 3 adapters."
 
 
 @pytest.mark.anyio

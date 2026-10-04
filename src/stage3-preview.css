@@ -1,0 +1,85 @@
+.app-shell[data-project-preview='true'] .page-head .eyebrow,
+.app-shell[data-project-preview='true'] .page-head h1,
+.app-shell[data-project-preview='true'] .page-head .subhead,
+.app-shell[data-project-preview='true'] .review-title > span,
+.app-shell[data-project-preview='true'] .preview-note > span:last-child,
+.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .panel-title,
+.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .graph-list > p {
+  font-size: 0;
+}
+
+.app-shell[data-project-preview='true'] .page-head .eyebrow::after,
+.app-shell[data-project-preview='true'] .page-head h1::after,
+.app-shell[data-project-preview='true'] .page-head .subhead::after,
+.app-shell[data-project-preview='true'] .review-title > span::after,
+.app-shell[data-project-preview='true'] .preview-note > span:last-child::after,
+.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .panel-title::after,
+.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .graph-list > p::after {
+  font-size: 13px;
+}
+
+.app-shell[data-project-preview='true'] .page-head .eyebrow::after {
+  content: 'STAGE 3 · LOCAL PARSED PREVIEW';
+}
+
+.app-shell[data-project-preview='true'] .page-head h1::after {
+  content: 'Document preview';
+  font-size: 30px;
+}
+
+.app-shell[data-project-preview='true'] .page-head .subhead::after {
+  content: 'Content is parsed locally for review. The original remains unchanged; candidate review and export come later.';
+  color: var(--muted);
+}
+
+.app-shell[data-project-preview='true'] .page-head > .primary-btn,
+.app-shell[data-project-preview='true'] .review-toolbar .view-switch,
+.app-shell[data-project-preview='true'] .slider-area,
+.app-shell[data-project-preview='true'] .doc-kicker,
+.app-shell[data-project-preview='true'] .legend,
+.app-shell[data-project-preview='true'] .preview-foot,
+.app-shell[data-project-preview='true'] .undo-button,
+.app-shell[data-project-preview='true'] .right-stack > .panel:last-child {
+  display: none;
+}
+
+.app-shell[data-project-preview='true'] .review-title > span::after {
+  content: 'Original · parsed preview only · no changes saved';
+}
+
+.app-shell[data-project-preview='true'] .preview-note > span:last-child::after {
+  content: 'No candidate extraction has run. The content below is a local format preview.';
+}
+
+.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .panel-title::after {
+  content: 'Candidate extraction';
+}
+
+.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .panel-meta {
+  display: none;
+}
+
+.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .graph-list > p::after {
+  content: 'Candidate extraction is a later stage.';
+  color: var(--muted);
+}
+
+.app-shell[data-project-preview='true'][data-preview-error='true'] .page-head .eyebrow::after {
+  content: 'SAVED ORIGINAL · PREVIEW UNAVAILABLE';
+}
+
+.app-shell[data-project-preview='true'][data-preview-error='true'] .page-head h1::after {
+  content: 'Format not supported yet';
+}
+
+.app-shell[data-project-preview='true'][data-preview-error='true'] .page-head .subhead::after {
+  content: 'This original remains saved and unchanged. Its document format does not have a Stage 3 preview adapter.';
+}
+
+.app-shell[data-project-preview='true'][data-preview-error='true'] .review-title > span::after {
+  content: 'Saved original · not parsed or modified';
+}
+
+.app-shell[data-project-preview='true'][data-preview-error='true'] .preview-note > span:last-child::after {
+  content: 'The local preview could not be generated. The original remains unchanged.';
+}

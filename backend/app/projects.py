@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .document_adapters import parse_document
 from .key_store import KeyStoreUnavailable, ProjectKeyStore
 from .local_crypto import atomic_write_private, decrypt_state, encrypt_state
 
@@ -139,6 +140,55 @@ class ProjectService:
         finally:
             connection.close()
         return [DocumentSummary(*row) for row in rows]
+
+    def preview_document(self, directory: str | Path, document_id: str) -> dict[str, object]:
+        root = self._validate_directory(directory)
+        self.open(root)
+        private_dir = root / ".blot"
+        connection = sqlite3.connect(private_dir / DATABASE_NAME)
+        try:
+            row = connection.execute(
+                "SELECT extension, original_path FROM documents WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise ProjectError("Project document metadata could not be read.") from exc
+        finally:
+            connection.close()
+        if row is None:
+            raise ProjectError("The selected project document was not found.")
+
+        extension, relative_path_value = row
+        relative_path = Path(relative_path_value)
+        if (
+            relative_path.is_absolute()
+            or len(relative_path.parts) != 3
+            or relative_path.parts[0] != "originals"
+            or relative_path.parts[1] != document_id
+            or relative_path.parts[2] != f"original{extension}"
+        ):
+            raise ProjectError("The stored project document path is invalid.")
+        originals_dir = private_dir / "originals"
+        document_dir = originals_dir / document_id
+        original_path = private_dir / relative_path
+        if (
+            private_dir.is_symlink()
+            or originals_dir.is_symlink()
+            or document_dir.is_symlink()
+            or original_path.is_symlink()
+        ):
+            raise ProjectError("The stored project document path is unsafe.")
+        try:
+            resolved_originals = originals_dir.resolve(strict=True)
+            resolved_path = original_path.resolve(strict=True)
+            if not resolved_path.is_relative_to(resolved_originals) or not resolved_path.is_file():
+                raise ProjectError("The stored project document is missing or unsafe.")
+            if resolved_path.stat().st_size > MAX_DOCUMENT_BYTES:
+                raise ProjectError("The stored project document exceeds the 100 MB processing limit.")
+            content = resolved_path.read_bytes()
+        except (OSError, RuntimeError) as exc:
+            raise ProjectError("The stored project document is missing or cannot be read.") from exc
+        return parse_document(content, extension).to_public_dict()
 
     def import_documents(self, directory: str | Path, sources: list[str | Path]) -> list[DocumentSummary]:
         root = self._validate_directory(directory)

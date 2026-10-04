@@ -103,10 +103,11 @@ Development keeps the existing high-fidelity React design. Release serving must 
 
 - TXT/MD: preserve line endings, BOM/encoding, and ordinary text structure; support UTF-8 and detectable UTF-16 only.
 - CSV: retain delimiters, quoting, rows, columns, and supported encoding; reject ambiguous dialects rather than silently rewrite structure.
-- XLSX: traverse literal text values across worksheets, retain formulas/styles/relationships, skip formula rewriting, and produce a coverage report. Restore exact tokens in returned workbooks.
-- Validate archive safety, malformed packages, large inputs, and pre-existing placeholder-like text before allowing export.
+- XLSX: traverse literal text values across worksheets, retain formulas/styles/relationships, skip formula rewriting, and produce a coverage report. Adapter tests prove exact-token replacement round-trips; the project restoration workflow remains Stage 8.
+- Validate archive safety, malformed packages, large inputs, and count pre-existing placeholder-like text so Stage 7 can require review before export.
+- Provide protected, bounded local previews for TXT/MD/CSV/XLSX. Count existing placeholder-like strings without logging or returning their values; report unsupported workbook parts rather than implying complete coverage.
 
-**Gate:** golden fixtures prove byte/structure invariants (except intended cell/text replacement); originals are unchanged; unknown/malformed input is reported before export.
+**Gate:** golden fixtures prove encoding, line-ending, CSV dialect, and workbook structure invariants (except intended cell/text replacement); formulas/styles/relationships and originals remain unchanged; malformed/ambiguous input and unsupported workbook parts are reported before later export.
 
 ### Stage 4 — DOCX/PPTX editable-text adapters and coverage report
 
@@ -192,6 +193,7 @@ Development keeps the existing high-fidelity React design. Release serving must 
 - [x] Captured platform, format, model, privacy, storage, and workflow decisions.
 - [x] Stage 1: baseline local React + FastAPI runtime and test/security scaffolding.
 - [x] Stage 2: native project/document pickers, create/open/import UI and API, SQLite document/version records, read-only source copies, OS-protected data key, AES-GCM-encrypted graph/map sidecar, and missing-key errors.
-- [ ] Stages 3–10: not started. Per the user's latest instruction, stop implementation after Stage 2; later stages remain plan-only.
+- [x] Stage 3: strict UTF-8/UTF-16 TXT/MD parsing; structure-preserving CSV scanning/replacement; safe XLSX literal-cell preview/replacement with formula/package preservation and coverage warnings; protected bounded preview API/UI; placeholder-like text count.
+- [ ] Stages 4–10: not started.
 
-**Stage 2 boundary:** imported originals are saved and versioned but not parsed or modified; the UI clearly labels demo samples as unsaved. Text preview and document processing begin in Stage 3. Idle relock and portable encrypted backup remain release-hardening work (Stage 9); the chosen unlock policy is OS reauthentication, not a UI-only lock.
+**Stage 3 boundary:** DOCX/PPTX parsing begins in Stage 4. Candidate extraction/graph suggestions begin in Stage 5; review workflow is Stage 6; obfuscation/export is Stage 7; returned Office restoration is Stage 8. Stage 3's XLSX adapter supports exact mapped text replacement for adapter round-trip verification, but the product does not yet expose an export or restoration workflow. Idle relock and portable encrypted backup remain release-hardening work (Stage 9); the chosen unlock policy is OS reauthentication, not a UI-only lock.

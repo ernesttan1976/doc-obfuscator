@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .document_adapters import DocumentAdapterError
 from .folder_picker import (
     FolderPickerError,
     pick_document_files,
@@ -78,6 +79,11 @@ class OpenProjectRequest(BaseModel):
 class ImportDocumentsRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=4096)
     files: list[str] = Field(min_length=1, max_length=100)
+
+
+class PreviewDocumentRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
 
 
 def create_app(
@@ -192,6 +198,17 @@ def create_app(
             return {"documents": [document.to_public_dict() for document in documents]}
         except KeyStoreUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/document-preview")
+    def preview_project_document(payload: PreviewDocumentRequest) -> dict[str, object]:
+        try:
+            return project_service().preview_document(payload.directory, payload.document_id)
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except DocumentAdapterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ProjectError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

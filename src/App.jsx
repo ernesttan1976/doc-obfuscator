@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import './stage3-preview.css';
 
 const sampleText = [
   'Alex Tan will brief the board on Project Cedar at the Tuesday session. The working team has moved the launch window to the second week of November.',
@@ -54,6 +55,28 @@ const countGroupMatches = (text, members) => {
   return count;
 };
 
+const previewLines = (preview) => {
+  const content = typeof preview.text === 'string'
+    ? preview.text.split(/\r\n|\r|\n/)
+    : preview.format === 'CSV'
+      ? preview.rows.map((row, index) => `${index + 1}  ${row.map((cell) => cell.text).join('  │  ')}`)
+      : preview.sheets.flatMap((sheet) => [sheet.name, ...sheet.cells.map((cell) => `${cell.address}: ${cell.text}`)]);
+  const hasText = typeof preview.text === 'string'
+    ? preview.text.length > 0
+    : preview.format === 'CSV'
+      ? preview.rows.some((row) => row.some((cell) => cell.text.length > 0))
+      : preview.sheets.some((sheet) => sheet.cells.length > 0);
+  const csvDialect = preview.dialect ? ` · delimiter ${JSON.stringify(preview.dialect.delimiter)}` : '';
+  const lineEndings = preview.lineEndings ? ` · ${preview.lineEndings}` : '';
+  const metadata = [`Parsed ${preview.format} · ${preview.encoding}${lineEndings}${csvDialect}`];
+  if (preview.truncated) metadata.push('Preview is truncated; the saved original remains complete.');
+  if (preview.existingPlaceholderLikeTextCount) {
+    metadata.push(`Existing placeholder-like strings: ${preview.existingPlaceholderLikeTextCount}. Review before processing.`);
+  }
+  metadata.push(...preview.warnings.map((warning) => `Coverage warning: ${warning}`));
+  return [...metadata, ...(hasText ? content : ['No supported literal text was found.'])];
+};
+
 function makeToken(used) {
   let token;
   do {
@@ -96,7 +119,7 @@ export default function App() {
   const decisions = decisionSets[activeName] || { alex: 'suggested', cedar: 'suggested' };
   const confirmed = confirmationSets[activeName] || { alex: true, cedar: false };
   const getActiveMembers = (group) => confirmed[group.id] ? group.members : group.members.slice(0, 1);
-  const visibleGroups = groups.filter((group) => (level >= group.level || decisions[group.id] !== 'suggested') && getActiveMembers(group).some((member) => countMatches(activeText, member)));
+  const visibleGroups = activeFile.isProjectDocument ? [] : groups.filter((group) => (level >= group.level || decisions[group.id] !== 'suggested') && getActiveMembers(group).some((member) => countMatches(activeText, member)));
   const changeRows = visibleGroups.flatMap((group) => {
     const members = getActiveMembers(group);
     const occurrences = countGroupMatches(activeText, members);
@@ -145,6 +168,7 @@ export default function App() {
   };
 
   const renderParagraph = (paragraph) => {
+    if (activeFile.isProjectDocument) return paragraph;
     const terms = groups.flatMap((group) => getActiveMembers(group).map((member) => ({ member, group })))
       .sort((a, b) => b.member.length - a.member.length);
     if (!terms.length) return paragraph;
@@ -159,6 +183,47 @@ export default function App() {
       if (!className) return part;
       return <button key={`${group.id}-${index}`} type="button" className={`term ${className}`} onClick={() => changeDecision(group.id, decision === 'excluded' ? 'included' : 'excluded')} aria-label={`${part}: toggle obfuscation decision`}>{part}</button>;
     });
+  };
+
+  const loadProjectDocumentPreview = async (documentId) => {
+    if (!projectDirectory || !localToken) return;
+    setFiles((current) => current.map((file) => (
+      file.id === documentId ? { ...file, previewLoading: true } : file
+    )));
+    try {
+      const response = await fetch('/api/projects/document-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: projectDirectory, document_id: documentId }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not parse this document for preview');
+      const content = previewLines(data);
+      setFiles((current) => current.map((file) => (
+        file.id === documentId
+          ? {
+            ...file,
+            content: content.length ? content : ['No supported literal text was found in this document.'],
+            rawText: data.text ?? content.join('\n'),
+            previewFormat: data.format,
+            previewEncoding: data.encoding,
+            previewWarnings: data.warnings,
+            previewTruncated: data.truncated,
+            previewError: false,
+            previewLoaded: true,
+            previewLoading: false,
+            status: 'Parsed preview · original unchanged',
+          }
+          : file
+      )));
+    } catch (error) {
+      setFiles((current) => current.map((file) => (
+        file.id === documentId
+          ? { ...file, content: [`Preview unavailable: ${error.message}`], previewLoading: false, previewLoaded: true, previewError: true }
+          : file
+      )));
+      setToast(error.message || 'Could not parse this document for preview');
+    }
   };
 
   const handleImport = async (event) => {
@@ -221,7 +286,7 @@ export default function App() {
         name: document.name,
         type: document.type,
         status: 'Saved original · v01',
-        content: ['This original is stored in the local project. Its contents have not been read or modified. Text preview arrives in Stage 3.'],
+        content: ['Loading a local parsed preview…'],
         rawText: '',
         heading: `${document.name} · saved original`,
         isProjectDocument: true,
@@ -230,6 +295,7 @@ export default function App() {
       setActiveName(imported[0].id);
       setSelectedGroup('alex');
       setView('preview');
+      await loadProjectDocumentPreview(imported[0].id);
       setToast(`${imported.length} original${imported.length === 1 ? '' : 's'} copied into the local project`);
     } catch (error) {
       setToast(error.message || 'Could not import the selected documents');
@@ -318,7 +384,7 @@ export default function App() {
         name: document.name,
         type: document.type,
         status: 'Saved original · v01',
-        content: ['This original is stored in the local project. Its contents have not been read or modified. Text preview arrives in Stage 3.'],
+        content: ['Loading a local parsed preview…'],
         rawText: '',
         heading: `${document.name} · saved original`,
         isProjectDocument: true,
@@ -327,6 +393,7 @@ export default function App() {
       setFiles([...savedDocuments, ...initialFiles]);
       setActiveName(savedDocuments[0]?.id || initialFiles[0].name);
       setProjectModalOpen(false);
+      if (savedDocuments[0]) await loadProjectDocumentPreview(savedDocuments[0].id);
       setToast(`${projectAction === 'create' ? 'Created' : 'Opened'} local project “${data.name}”`);
     } catch (error) {
       setToast(error.message || 'Could not open this project');
@@ -356,10 +423,13 @@ export default function App() {
     setView('preview');
     setUndo(null);
     setToast(`Opened ${file.name} · original remains unchanged`);
+    if (file.isProjectDocument && !file.previewLoaded && !file.previewLoading) {
+      void loadProjectDocumentPreview(file.id);
+    }
   };
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-project-preview={activeFile.isProjectDocument ? 'true' : undefined} data-preview-error={activeFile.previewError ? 'true' : undefined}>
       <aside className="sidebar" data-od-id="sidebar">
         <div className="brand-row"><div className="brand-mark" aria-hidden="true">B</div><div><div className="brand-name">Blot</div><div className="brand-sub">private document workspace</div></div></div>
         <div className="side-section"><div className="side-label">Workspace</div><button className="side-link active" onClick={() => setToast('Review queue opened')}><span className="side-icon">◈</span> Review queue</button><button className="side-link" onClick={() => setToast('Showing all project files')}><span className="side-icon">□</span> All files <span style={{ marginLeft: 'auto', fontSize: 11 }}>{files.length}</span></button><button className="side-link" onClick={() => setToast('Activity is up to date')}><span className="side-icon">↺</span> Activity</button></div>
