@@ -17,7 +17,7 @@ from backend.app.document_adapters import (
 )
 
 
-def test_pattern_candidates_record_sensitivity_scores_occurrences_and_unconfirmed_proposals():
+def test_pattern_candidates_use_spread_priorities_occurrences_and_unconfirmed_proposals():
     parsed = parse_document(
         b"Contact Alex Tan at alex.tan@example.test or +1 (415) 555-0199 on May 7, 2026. "
         b"Reference CASE-2026-ABC; Alex Tann reviewed it.",
@@ -32,14 +32,15 @@ def test_pattern_candidates_record_sensitivity_scores_occurrences_and_unconfirme
     by_term = {candidate["term"]: candidate for candidate in candidates}
 
     assert by_term["alex.tan@example.test"]["category"] == "EMAIL"
-    assert by_term["alex.tan@example.test"]["level"] == 10
+    assert by_term["alex.tan@example.test"]["level"] == 2
     assert by_term["+1 (415) 555-0199"]["category"] == "PHONE"
-    assert by_term["+1 (415) 555-0199"]["level"] == 9
+    assert by_term["+1 (415) 555-0199"]["level"] == 3
     assert by_term["May 7, 2026"]["category"] == "DATE"
-    assert by_term["May 7, 2026"]["level"] == 3
+    assert by_term["May 7, 2026"]["level"] == 10
     assert by_term["CASE-2026-ABC"]["category"] == "IDENTIFIER"
-    assert by_term["CASE-2026-ABC"]["level"] == 8
-    assert by_term["Alex Tan"]["level"] == 4
+    assert by_term["CASE-2026-ABC"]["level"] == 4
+    assert by_term["Alex Tan"]["level"] == 8
+    assert {candidate["level"] for candidate in candidates} >= {2, 3, 4, 8, 10}
     assert by_term["Alex Tan"]["occurrences"][0] == {
         "location": "text",
         "start": 8,
@@ -91,9 +92,9 @@ def test_ner_entities_become_suggestions_and_enrich_matching_pattern_candidates(
     assert by_term["Alex Tan"]["category"] == "NER_ENTITY"
     assert by_term["Alex Tan"]["nerLabels"] == ["person"]
     assert by_term["Alex Tan"]["nerScore"] == 0.91
-    assert by_term["Alex Tan"]["level"] == 10
+    assert by_term["Alex Tan"]["level"] == 2
     assert by_term["Example Corp"]["source"] == "ner"
-    assert by_term["Example Corp"]["level"] == 7
+    assert by_term["Example Corp"]["level"] == 5
     assert "Wrong text" not in by_term
 
 

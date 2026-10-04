@@ -22,29 +22,29 @@ CONTEXTUAL_PROPOSAL_THRESHOLD = 0.72
 MAX_CONTEXTS_PER_CANDIDATE = 3
 MAX_CONTEXT_WINDOW_CHARS = 192
 
-# Default sensitivity scores are heuristics for filtering, not a guarantee that
-# every occurrence has been identified correctly.
-CANDIDATE_SENSITIVITY_LEVELS = {
-    "EMAIL": 10,
-    "PHONE": 9,
-    "DATE": 3,
-    "IDENTIFIER": 8,
-    "CAPITALIZED_PHRASE": 4,
-    "MANUAL": 10,
+# Priorities run from 2 (most sensitive) to 10 (least sensitive). These are
+# heuristics for filtering, not a guarantee that every occurrence was found.
+CANDIDATE_PRIORITY_LEVELS = {
+    "EMAIL": 2,
+    "PHONE": 3,
+    "DATE": 10,
+    "IDENTIFIER": 4,
+    "CAPITALIZED_PHRASE": 8,
+    "MANUAL": 2,
 }
-NER_LABEL_SENSITIVITY_LEVELS = {
-    "PERSON": 9,
-    "EMAIL": 10,
-    "PHONE": 9,
-    "LOCATION": 8,
-    "ADDRESS": 8,
-    "IDENTIFIER": 8,
-    "ACCOUNT NUMBER": 8,
+NER_LABEL_PRIORITY_LEVELS = {
+    "PERSON": 2,
+    "EMAIL": 2,
+    "PHONE": 3,
+    "LOCATION": 4,
+    "ADDRESS": 4,
+    "IDENTIFIER": 4,
+    "ACCOUNT NUMBER": 4,
     "ORGANIZATION": 6,
     "ORG": 6,
     "COMPANY": 6,
-    "DATE": 3,
-    "TIME": 3,
+    "DATE": 10,
+    "TIME": 10,
 }
 
 _EMAIL = re.compile(
@@ -234,7 +234,7 @@ def analyze_candidates(
                 "versionId": version_id,
                 "term": term,
                 "category": record["category"],
-                "level": _sensitivity_level(
+                "level": _priority_level(
                     str(record["category"]),
                     record["nerLabels"],
                     float(record["nerScore"]),
@@ -597,16 +597,16 @@ def _category_priority(category: str) -> int:
     }.get(category, 4)
 
 
-def _sensitivity_level(category: str, ner_labels: set[str], ner_score: float) -> int:
+def _priority_level(category: str, ner_labels: set[str], ner_score: float) -> int:
     if category != "NER_ENTITY":
-        return CANDIDATE_SENSITIVITY_LEVELS.get(category, 5)
-    label_levels = [
-        NER_LABEL_SENSITIVITY_LEVELS.get(label.upper(), 5)
+        return CANDIDATE_PRIORITY_LEVELS.get(category, 8)
+    label_priorities = [
+        NER_LABEL_PRIORITY_LEVELS.get(label.upper(), 8)
         for label in ner_labels
     ]
-    base_level = max(label_levels, default=5)
+    base_priority = min(label_priorities, default=8)
     confidence_adjustment = round((max(0.0, min(1.0, ner_score)) - 0.5) * 2)
-    return max(1, min(10, base_level + confidence_adjustment))
+    return max(2, min(10, base_priority - confidence_adjustment))
 
 
 def _candidate_id(version_id: str, normalized_term: str) -> str:

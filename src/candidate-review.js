@@ -1,5 +1,5 @@
 export function getVisibleCandidates(candidates, level) {
-  return candidates.filter((candidate) => candidate.level > level);
+  return candidates.filter((candidate) => candidate.level >= 2 && candidate.level <= level);
 }
 
 export function getCandidateDecisionCounts(candidates) {
@@ -9,6 +9,6 @@ export function getCandidateDecisionCounts(candidates) {
   }, { suggested: 0, included: 0, excluded: 0 });
 }
 
-export function getCandidatesAtOrBelowPriority(candidates, level) {
-  return candidates.filter((candidate) => candidate.level <= level).length;
+export function getCandidatesNotSelectedAtLevel(candidates, level) {
+  return candidates.filter((candidate) => candidate.level < 2 || candidate.level > level).length;
 }

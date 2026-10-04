@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { getCandidateDecisionCounts, getCandidatesAtOrBelowPriority, getVisibleCandidates } from './candidate-review.js';
+import { getCandidateDecisionCounts, getCandidatesNotSelectedAtLevel, getVisibleCandidates } from './candidate-review.js';
 import './stage3-preview.css';
 
 const sampleText = [
@@ -15,7 +15,7 @@ const groups = [
     confidence: '96%',
     reason: 'Alias + formatting variant',
     token: 'T_001',
-    level: 1,
+    level: 2,
     confirmed: true,
   },
   {
@@ -25,7 +25,7 @@ const groups = [
     confidence: '89%',
     reason: 'Contextual similarity · confirm before grouping',
     token: 'T_002',
-    level: 3,
+    level: 8,
     confirmed: false,
   },
 ];
@@ -156,7 +156,7 @@ export default function App() {
   const decisions = decisionSets[activeName] || { alex: 'suggested', cedar: 'suggested' };
   const confirmed = confirmationSets[activeName] || { alex: true, cedar: false };
   const getActiveMembers = (group) => confirmed[group.id] ? group.members : group.members.slice(0, 1);
-  const visibleGroups = activeFile.isProjectDocument ? [] : groups.filter((group) => group.level > level && getActiveMembers(group).some((member) => countMatches(activeText, member)));
+  const visibleGroups = activeFile.isProjectDocument ? [] : groups.filter((group) => group.level >= 2 && group.level <= level && getActiveMembers(group).some((member) => countMatches(activeText, member)));
   const changeRows = visibleGroups.flatMap((group) => {
     const members = getActiveMembers(group);
     const occurrences = countGroupMatches(activeText, members);
@@ -165,7 +165,7 @@ export default function App() {
   const candidates = activeFile.candidates || [];
   const matchCount = reviewableProjectDocument
     ? candidates
-      .filter((candidate) => candidate.level > level && candidate.decision !== 'excluded')
+      .filter((candidate) => candidate.level >= 2 && candidate.level <= level && candidate.decision !== 'excluded')
       .reduce((sum, candidate) => sum + candidate.occurrenceCount, 0)
     : changeRows.reduce((sum, row) => sum + (row.decision === 'excluded' ? 0 : row.occurrences), 0);
   const visibleCandidates = reviewableProjectDocument ? getVisibleCandidates(candidates, level) : [];
@@ -179,7 +179,7 @@ export default function App() {
     ))
   ));
   const candidateDecisionCounts = getCandidateDecisionCounts(candidates);
-  const excludedByPriorityCount = getCandidatesAtOrBelowPriority(candidates, level);
+  const notIncludedByLevelCount = getCandidatesNotSelectedAtLevel(candidates, level);
   const previewCoverage = activeFile.previewCoverage;
   const previewWarnings = activeFile.previewWarnings || [];
   const unsupportedPartCount = previewCoverage?.unsupportedPartCount || 0;
@@ -435,7 +435,7 @@ export default function App() {
       }
       const { group } = found;
       const decision = decisions[group.id];
-      const isCandidate = group.level > level;
+      const isCandidate = group.level >= 2 && group.level <= level;
       const className = isCandidate ? (decision === 'excluded' ? 'excluded' : decision === 'included' ? 'included' : 'auto') : '';
       if (!className) return part;
       const target = { kind: 'group', id: group.id };
@@ -797,6 +797,10 @@ export default function App() {
       setToast('Select an original version in an open local project before preparing an export.');
       return;
     }
+    if (!matchCount) {
+      setToast(`No candidates are selected at level ${level}. Increase the level to obfuscate detected terms.`);
+      return;
+    }
     setExportBusy(true);
     setExportPreview(null);
     setExportAcknowledged(false);
@@ -912,7 +916,7 @@ export default function App() {
       map.set(token, row.group.term);
     }
     if (!map.size) {
-      setToast('No candidates are above this priority cutoff. Choose a lower cutoff to obfuscate terms.');
+      setToast('No candidates are selected at this obfuscation level. Increase the level to obfuscate detected terms.');
       return;
     }
     setReplacementMaps((current) => ({ ...current, [activeFile.name]: Object.fromEntries(map) }));
@@ -1339,8 +1343,8 @@ export default function App() {
             <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${projectDocuments.length} saved` : `${files.length} items`}</span></div><div className="file-list">{(currentProject ? projectDocuments : files).map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span className="file-copy"><span className="file-name">{file.name}</span><span className="file-status">{file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : ''}</span></button>)}{currentProject && projectDocuments.length === 0 && <p className="empty-file-list">No project documents yet.</p>}</div></aside>
             <section className="panel review-panel">
                <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? `${activeVersion.kind === 'original' ? 'Saved original' : activeVersion.kind === 'restored' ? 'Restored copy' : 'Obfuscated copy'} · local preview` : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="review-toolbar-actions">{activeFile.isProjectDocument && <label className="version-select">Version<select aria-label="Select document version" value={activeFile.selectedVersionId || activeFile.versionId} onChange={(event) => selectProjectVersion(event.target.value)}>{(activeFile.versions || []).map((version) => <option key={version.id} value={version.id}>{version.kind === 'original' ? 'Original' : version.kind === 'restored' ? 'Restored' : 'Obfuscated'} · {version.name}</option>)}</select></label>}<div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div></div>
-                {reviewableProjectDocument && <div className="priority-area"><fieldset className="priority-fieldset"><legend>Obfuscation level</legend><div className="priority-scale" aria-hidden="true"><span>1 · Full obfuscation</span><strong>Level {level}</strong><span>10 · No obfuscation</span></div><input className="priority-slider" type="range" min="1" max="10" step="1" value={level} aria-label="Obfuscation level" aria-valuetext={`${level} — ${level === 1 ? 'Full obfuscation' : level === 10 ? 'No obfuscation' : 'Partial obfuscation'}`} onChange={(event) => { setExportPreview(null); setLevel(Number(event.target.value)); }} /><p className="priority-help">1 applies the strongest obfuscation; 10 excludes priorities 1–10, so nothing is obfuscated.</p></fieldset></div>}
-              {reviewableProjectDocument && <p className="sensitivity-note">Include and Exclude decisions apply only to candidates above this cutoff.</p>}
+                {reviewableProjectDocument && <div className="priority-area"><fieldset className="priority-fieldset"><legend>Obfuscation level</legend><div className="priority-scale" aria-hidden="true"><span>1 · 0%</span><strong>Level {level}</strong><span>10 · 100%</span></div><input className="priority-slider" type="range" min="1" max="10" step="1" value={level} aria-label="Obfuscation level" aria-valuetext={`Level ${level}: ${level === 1 ? '0% obfuscation; no terms selected' : level === 10 ? '100% obfuscation; priorities 2 through 10 selected' : `priorities 2 through ${level} selected`}`} onChange={(event) => { setExportPreview(null); setLevel(Number(event.target.value)); }} /><p className="priority-help">Priorities run from 2 (most sensitive) to 10 (least sensitive). Level 1 selects none; level 10 selects priorities 2–10.</p></fieldset></div>}
+              {reviewableProjectDocument && <p className="sensitivity-note">Include and Exclude decisions apply only to candidates selected at this level.</p>}
                {view === 'preview' && <p className="term-interaction-help">Click a highlighted word to include · double-click to exclude · right-click for options.</p>}
                {view === 'preview' && previewSections.length > 1 && <div className="preview-navigation preview-navigation-main" role="group" aria-label="Preview section navigation" aria-describedby="preview-page-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}>
                  <span className="sr-only" id="preview-page-navigation-help">Use Left or Right Arrow to move between preview sections, or Home and End to jump to the first and last sections.</span>
@@ -1385,7 +1389,7 @@ export default function App() {
                   <span><strong>{candidateDecisionCounts.suggested}</strong> need review</span>
                   <span><strong>{candidateDecisionCounts.included}</strong> included</span>
                   <span><strong>{candidateDecisionCounts.excluded}</strong> excluded</span>
-                  {excludedByPriorityCount > 0 && <span><strong>{excludedByPriorityCount}</strong> excluded by this priority cutoff</span>}
+                  {notIncludedByLevelCount > 0 && <span><strong>{notIncludedByLevelCount}</strong> not selected at this level</span>}
                   <span><strong>{proposals.length}</strong> proposals not in a group</span>
                 </div>
                 <div className="graph-list">
@@ -1404,7 +1408,7 @@ export default function App() {
                       <button className={`small-btn ${candidate.decision === 'excluded' ? 'selected' : ''}`} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'excluded' ? 'suggested' : 'excluded')}>{candidate.decision === 'excluded' ? 'Excluded' : 'Exclude'}</button>
                     </div>
                   </div>)}
-                  {!activeFile.candidateLoading && !activeFile.candidateError && visibleCandidates.length === 0 && <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>{activeFile.previewError ? 'Candidate analysis requires a readable local preview.' : candidates.length ? level === 10 ? 'All priorities (1–10) are excluded by this cutoff; nothing will be obfuscated.' : 'No candidates are above this priority cutoff.' : 'No candidates found in supported editable text.'}</p>}
+                  {!activeFile.candidateLoading && !activeFile.candidateError && visibleCandidates.length === 0 && <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>{activeFile.previewError ? 'Candidate analysis requires a readable local preview.' : candidates.length ? level === 1 ? 'Level 1 is 0% obfuscation. Increase the level to include priority 2 and above.' : `No candidates at priorities 2–${level}; increase the level to include less-sensitive terms.` : 'No candidates found in supported editable text.'}</p>}
                 </div>
                 {proposals.length > 0 && <div className="candidate-subsection"><div className="candidate-subhead">Similarity proposals · confirm before grouping</div>{proposals.slice(0, 50).map((proposal) => <div className="proposal-row" key={proposal.id}><div><strong>{candidatesById[proposal.sourceId].term} ↔ {candidatesById[proposal.targetId].term}</strong><span>{proposal.reason}</span></div><button className="small-btn" onClick={() => applyCandidateGroupOperation('add', [proposal.sourceId, proposal.targetId])}>Confirm group</button></div>)}</div>}
                 {candidateGroups.length > 0 && <div className="candidate-subsection"><div className="candidate-subhead">Confirmed groups</div>{candidateGroups.map((group) => <div className="confirmed-group" key={group.id}><label><input type="checkbox" checked={mergeGroupIds.includes(group.id)} onChange={(event) => setMergeGroupIds((current) => event.target.checked ? [...current, group.id] : current.filter((id) => id !== group.id))} /> Merge group</label>{group.candidateIds.map((candidateId) => <div className="confirmed-member" key={candidateId}><span>{candidatesById[candidateId]?.term || 'Candidate'}</span><div>{group.candidateIds.length > 1 && <button className="small-btn" onClick={() => applyCandidateGroupOperation('split', [candidateId], group.id)}>Split out</button>}<button className="small-btn" onClick={() => applyCandidateGroupOperation('remove', [candidateId], group.id)}>Remove</button></div></div>)}</div>)}<button className="small-btn" disabled={mergeGroupIds.length < 2} onClick={() => applyCandidateGroupOperation('merge', [], undefined, mergeGroupIds)}>Merge selected groups</button></div>}

@@ -587,21 +587,27 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
         )
         broad_preview_response = await client.post(
             "/api/projects/export-preview",
-            json={**request, "level": 1},
+            json={**request, "level": 10},
             headers=headers,
         )
         denied = await client.post("/api/projects/export-preview", json={**request, "level": 1})
-        preview_response = await client.post(
+        partial_preview_response = await client.post(
             "/api/projects/export-preview",
-            json={**request, "level": 3},
+            json={**request, "level": 2},
             headers=headers,
         )
-        all_excluded = await client.post(
+        preview_response = await client.post(
             "/api/projects/export-preview",
             json={**request, "level": 10},
             headers=headers,
         )
+        all_excluded = await client.post(
+            "/api/projects/export-preview",
+            json={**request, "level": 1},
+            headers=headers,
+        )
         broad_preview = broad_preview_response.json()
+        partial_preview = partial_preview_response.json()
         preview = preview_response.json()
         unacknowledged = await client.post(
             "/api/projects/export",
@@ -632,12 +638,13 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
     assert denied.status_code == 401
     assert preview_response.status_code == 200
     assert all_excluded.status_code == 400
-    assert "No candidates have priority above this cutoff" in all_excluded.json()["detail"]
+    assert "No candidates are selected at this obfuscation level" in all_excluded.json()["detail"]
     assert preview["requiresAcknowledgement"] is True
     assert preview["preexistingPlaceholderCount"] == 1
     assert len(preview["matches"]) == 2
     assert {match["term"] for match in preview["matches"]} == {"Alex Tan", "Project Cedar"}
-    assert any(match["term"] == "Project Cedar" for match in broad_preview["matches"])
+    assert {match["term"] for match in partial_preview["matches"]} == {"Alex Tan"}
+    assert {match["term"] for match in broad_preview["matches"]} == {"Alex Tan", "Project Cedar"}
     assert all(match["term"] != "alex@example.test" for match in preview["matches"])
     generated_tokens = re.findall(r"\[\[T_[0-9a-f]{6}\]\]", preview["preview"]["text"])
     assert len(generated_tokens) == 2
@@ -695,7 +702,7 @@ async def test_returned_office_restoration_restores_only_exact_project_tokens(tm
         assert analysis.status_code == 200, analysis.text
         export_preview = await client.post(
             "/api/projects/export-preview",
-            json={**request, "level": 1},
+            json={**request, "level": 2},
             headers=headers,
         )
         token = export_preview.json()["matches"][0]["token"]
@@ -843,7 +850,7 @@ async def test_export_plan_is_invalidated_when_candidate_decisions_change(tmp_pa
         )
         preview = await client.post(
             "/api/projects/export-preview",
-            json={**request, "level": 1},
+            json={**request, "level": 2},
             headers=headers,
         )
         candidate = analysis.json()["candidates"][0]

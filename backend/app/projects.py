@@ -227,7 +227,7 @@ class ProjectService:
         level: int,
     ) -> dict[str, object]:
         if not 1 <= level <= 10:
-            raise ProjectError("Priority cutoff must be between 1 and 10.")
+            raise ProjectError("Obfuscation level must be between 1 and 10.")
         root = self._validate_directory(directory)
         parsed, original_version_id, original_bytes, _, _, _, display_name = self._read_document_version(
             root, document_id, None
@@ -236,10 +236,10 @@ class ProjectService:
         nodes, groups, edges = self._scoped_graph(state, document_id, original_version_id)
         selected = [
             node for node in nodes
-            if int(node.get("level", 10)) > level and node.get("decision") != "excluded"
+            if 2 <= int(node.get("level", 10)) <= level and node.get("decision") != "excluded"
         ]
         if not selected:
-            raise ProjectError("No candidates have priority above this cutoff. Lower the cutoff to obfuscate terms.")
+            raise ProjectError("No candidates are selected at this obfuscation level. Increase the level to include more terms.")
 
         replacements, mapping, matches, output_preview = self._prepare_export_replacements(
             parsed,
