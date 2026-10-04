@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getCandidateDecisionCounts, getCandidatesAtOrBelowPriority, getVisibleCandidates } from './candidate-review.js';
 import './stage3-preview.css';
 
@@ -122,6 +122,8 @@ export default function App() {
   const [mergeGroupIds, setMergeGroupIds] = useState([]);
   const [toast, setToast] = useState('');
   const [undo, setUndo] = useState(null);
+  const [termContextMenu, setTermContextMenu] = useState(null);
+  const termClickTimers = useRef(new Map());
   const [, setReplacementMaps] = useState({});
 
   const activeFile = files.find((file) => (file.id || file.name) === activeName) || files[0] || initialFiles[0];
@@ -308,6 +310,30 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => () => {
+    termClickTimers.current.forEach((timer) => window.clearTimeout(timer));
+    termClickTimers.current.clear();
+  }, []);
+
+  useEffect(() => {
+    if (!termContextMenu) return undefined;
+    const dismissMenu = (event) => {
+      if (event.type === 'keydown' && event.key !== 'Escape') return;
+      if (event.type === 'pointerdown' && event.target.closest?.('[data-term-context-menu]')) return;
+      setTermContextMenu(null);
+    };
+    document.addEventListener('pointerdown', dismissMenu);
+    document.addEventListener('keydown', dismissMenu);
+    return () => {
+      document.removeEventListener('pointerdown', dismissMenu);
+      document.removeEventListener('keydown', dismissMenu);
+    };
+  }, [termContextMenu]);
+
+  useEffect(() => {
+    setTermContextMenu(null);
+  }, [activeName, view]);
+
   const changeDecision = (groupId, decision) => {
     setUndo({ file: activeName, groupId, decision: decisions[groupId], confirmed: confirmed[groupId] });
     setDecisionSets((current) => ({ ...current, [activeName]: { ...(current[activeName] || { alex: 'suggested', cedar: 'suggested' }), [groupId]: decision } }));
@@ -315,6 +341,60 @@ export default function App() {
     const group = groups.find((item) => item.id === groupId);
     const label = decision === 'included' ? 'Included' : decision === 'excluded' ? 'Excluded' : 'Reset';
     setToast(`${label} ${group.term} group across this document`);
+  };
+
+  const applyTermDecision = (target, decision) => {
+    if (target.kind === 'candidate') {
+      void setProjectCandidateDecision(target.candidate, decision);
+    } else {
+      changeDecision(target.id, decision);
+    }
+    setTermContextMenu(null);
+  };
+
+  const getTermClickKey = (target) => `${activeName}:${target.kind}:${target.kind === 'candidate' ? target.candidate.id : target.id}`;
+
+  const clearTermClickTimer = (target) => {
+    const key = getTermClickKey(target);
+    const timer = termClickTimers.current.get(key);
+    if (timer) window.clearTimeout(timer);
+    termClickTimers.current.delete(key);
+    return key;
+  };
+
+  const handleTermClick = (event, target) => {
+    if (event.detail === 0) {
+      clearTermClickTimer(target);
+      applyTermDecision(target, 'included');
+      return;
+    }
+    if (event.detail > 1) {
+      clearTermClickTimer(target);
+      return;
+    }
+    const key = clearTermClickTimer(target);
+    const timer = window.setTimeout(() => {
+      termClickTimers.current.delete(key);
+      applyTermDecision(target, 'included');
+    }, 500);
+    termClickTimers.current.set(key, timer);
+  };
+
+  const handleTermDoubleClick = (event, target) => {
+    event.preventDefault();
+    clearTermClickTimer(target);
+    applyTermDecision(target, 'excluded');
+  };
+
+  const openTermContextMenu = (event, target) => {
+    event.preventDefault();
+    clearTermClickTimer(target);
+    setTermContextMenu({
+      target,
+      fileName: activeName,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 170)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 100)),
+    });
   };
 
   const renderParagraph = (paragraph) => {
@@ -331,19 +411,21 @@ export default function App() {
       if (!found) return part;
       if (found.candidate) {
         const { candidate } = found;
+        const target = { kind: 'candidate', candidate };
         const className = candidate.decision === 'excluded'
           ? 'excluded'
           : candidate.decision === 'included'
             ? 'included'
             : 'auto';
-        return <button key={`${candidate.id}-${index}`} type="button" className={`term ${className}`} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'included' ? 'excluded' : 'included')} aria-label={`${part}: candidate ${candidate.decision}; activate to toggle Include/Exclude`}>{part}</button>;
+        return <button key={`${candidate.id}-${index}`} type="button" className={`term ${className}`} onClick={(event) => handleTermClick(event, target)} onDoubleClick={(event) => handleTermDoubleClick(event, target)} onContextMenu={(event) => openTermContextMenu(event, target)} aria-label={`${part}: ${candidate.decision}; click to include, double-click to exclude, or right-click for options`}>{part}</button>;
       }
       const { group } = found;
       const decision = decisions[group.id];
       const isCandidate = group.level > level;
       const className = isCandidate ? (decision === 'excluded' ? 'excluded' : decision === 'included' ? 'included' : 'auto') : '';
       if (!className) return part;
-      return <button key={`${group.id}-${index}`} type="button" className={`term ${className}`} onClick={() => changeDecision(group.id, decision === 'excluded' ? 'included' : 'excluded')} aria-label={`${part}: toggle obfuscation decision`}>{part}</button>;
+      const target = { kind: 'group', id: group.id };
+      return <button key={`${group.id}-${index}`} type="button" className={`term ${className}`} onClick={(event) => handleTermClick(event, target)} onDoubleClick={(event) => handleTermDoubleClick(event, target)} onContextMenu={(event) => openTermContextMenu(event, target)} aria-label={`${part}: ${decision}; click to include, double-click to exclude, or right-click for options`}>{part}</button>;
     });
   };
 
@@ -1182,6 +1264,7 @@ export default function App() {
                <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? `${activeVersion.kind === 'original' ? 'Saved original' : activeVersion.kind === 'restored' ? 'Restored copy' : 'Obfuscated copy'} · local preview` : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="review-toolbar-actions">{activeFile.isProjectDocument && <label className="version-select">Version<select aria-label="Select document version" value={activeFile.selectedVersionId || activeFile.versionId} onChange={(event) => selectProjectVersion(event.target.value)}>{(activeFile.versions || []).map((version) => <option key={version.id} value={version.id}>{version.kind === 'original' ? 'Original' : version.kind === 'restored' ? 'Restored' : 'Obfuscated'} · {version.name}</option>)}</select></label>}<div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div></div>
                 {reviewableProjectDocument && <div className="priority-area"><fieldset className="priority-fieldset"><legend>Exclude priority and below</legend><div className="priority-options">{Array.from({ length: 10 }, (_, index) => index + 1).map((priority) => <label className={`priority-choice ${level === priority ? 'selected' : ''}`} key={priority} title={`Exclude priority ${priority} and below`}><input type="radio" name="sensitivity" value={priority} checked={level === priority} onChange={() => { setExportPreview(null); setLevel(priority); }} /><span>{priority}</span></label>)}</div><p className="priority-help">At 10, priorities 1–10 are all excluded, so nothing will be obfuscated.</p></fieldset></div>}
               {reviewableProjectDocument && <p className="sensitivity-note">Include and Exclude decisions apply only to candidates above this cutoff.</p>}
+              {view === 'preview' && <p className="term-interaction-help">Click a highlighted word to include · double-click to exclude · right-click for options.</p>}
               {view === 'preview' ? <div className="preview"><div className="preview-note"><span className="status-dot" /><span>{activeFile.isProjectDocument ? (activeFile.candidateLoading ? 'Scanning supported editable text locally…' : `${visibleCandidates.length} candidates shown at level ${level}. Review decisions below; only supported editable text is scanned.`) : `${visibleGroups.length} suggested groups are visible at this level. Click a highlighted term to decide.`}</span></div><article className="doc-page"><div className="doc-kicker">BOARD UPDATE · 04 OCTOBER 2026</div><h2>{activeFile.heading}</h2>{activeFile.content.map((paragraph, index) => <p key={`${activeFile.name}-${index}`}>{renderParagraph(paragraph)}</p>)}<div className="legend"><span className="legend-item"><span className="legend-swatch" />Suggested</span><span className="legend-item"><span className="legend-swatch manual" />Manual decision</span><span className="legend-item">Click a term to inspect its group</span></div></article><div className="preview-foot"><span><strong>{activeFile.isProjectDocument ? visibleCandidates.reduce((sum, candidate) => sum + (candidate.decision === 'excluded' ? 0 : candidate.occurrenceCount), 0) : matchCount}</strong> included or suggested occurrences at level <strong>{level}</strong></span><span>Original stays unchanged</span></div>{undo?.file === activeName && <button className="small-btn undo-button" onClick={undoDecision}>Undo last decision</button>}</div> : <div className="preview changes-pane"><div className="preview-note"><span className="status-dot" /><span>Export diff for version 03</span></div><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr style={{ color: 'var(--muted)', font: '11px var(--font-mono)', textAlign: 'left' }}><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>OCCURRENCE</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>REPLACEMENT</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>DECISION</th></tr></thead><tbody>{changeRows.map(({ group, occurrences, decision }) => <tr key={group.id}><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{group.term} · {occurrences} {occurrences === 1 ? 'match' : 'matches'}</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>[[{group.token}]]</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{decision === 'excluded' ? 'Excluded' : decision === 'included' ? 'Included' : 'Suggested'}</td></tr>)}</tbody></table></div>}
             </section>
             <aside className="right-stack">
@@ -1279,6 +1362,7 @@ export default function App() {
       {sessionLocked && <div className="modal-backdrop open session-lock-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="session-lock-title"><h2 id="session-lock-title">Local workspace locked</h2><p>Private project data is hidden after 15 minutes without activity. Reopen the project through the OS credential store to continue.</p><div className="modal-actions"><button className="primary-btn" type="button" disabled={unlockBusy || !localToken} onClick={unlockProjectSession}>{unlockBusy ? 'Unlocking…' : 'Unlock project'}</button></div></section></div>}
       {restorePreviewData && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !restoreBusy) setRestorePreviewData(null); }}><section className="modal export-preview-modal" role="dialog" aria-modal="true" aria-labelledby="restore-preview-title"><h2 id="restore-preview-title">Review restored copy</h2><p>{restorePreviewData.outputName} · {restorePreviewData.report.restoredCount} exact occurrences restored. The returned file and project versions remain unchanged until you save.</p><div className="export-preview-content"><h3>Restored output preview · {restorePreviewData.format}</h3><pre>{previewLines(restorePreviewData.preview).join('\n') || 'No supported editable text was found.'}</pre><h3>Adapter coverage</h3>{restorePreviewData.preview.warnings?.length ? <ul className="export-warning-list">{restorePreviewData.preview.warnings.map((warning, index) => <li key={`restore-warning-${index}`}>{warning}</li>)}</ul> : <p>No adapter coverage warnings were reported. This is not proof that all document content was examined.</p>}<h3>Unresolved tokens · {restorePreviewData.report.unresolvedCount}</h3>{restorePreviewData.report.unresolvedTokens.length ? <ul className="export-warning-list">{restorePreviewData.report.unresolvedTokens.map((item) => <li key={`${item.status}-${item.token}`}><code>{item.token}</code> · {item.count} · {item.status === 'altered' ? 'altered, left unchanged' : 'unknown or foreign, left unchanged'}</li>)}{restorePreviewData.report.unresolvedTokensTruncated && <li>Only the first 500 unique token values are listed; unresolved totals include all occurrences.</li>}</ul> : <p>No unresolved placeholder-like strings were detected in supported text.</p>}<p>Only exact intact tokens from this document and selected project version are restored. This report does not certify unsupported package content.</p></div><div className="modal-actions"><button className="text-btn" type="button" disabled={restoreBusy} onClick={() => setRestorePreviewData(null)}>Cancel</button><button className="primary-btn" type="button" disabled={restoreBusy} onClick={commitProjectRestoration}>{restoreBusy ? 'Saving…' : 'Save restored version'}</button></div></section></div>}
       {backupDialog && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !backupBusy) setBackupDialog(null); }}><form className="modal backup-modal" role="dialog" aria-modal="true" aria-labelledby="backup-dialog-title" onSubmit={backupDialog === 'create' ? createPortableBackup : restorePortableBackup}><h2 id="backup-dialog-title">Encrypted portable backup</h2><p>A passphrase-encrypted copy includes project documents, versions, and the private mapping. Keep the passphrase separately; it cannot be recovered.</p><div className="view-switch" role="tablist" aria-label="Backup action"><button type="button" className={backupDialog === 'create' ? 'active' : ''} role="tab" aria-selected={backupDialog === 'create'} onClick={() => setBackupDialog('create')} disabled={!currentProject}>Create</button><button type="button" className={backupDialog === 'restore' ? 'active' : ''} role="tab" aria-selected={backupDialog === 'restore'} onClick={() => setBackupDialog('restore')}>Restore</button></div>{backupDialog === 'restore' && <label className="project-field">Destination project folder<div className="backup-folder-field"><input value={backupDirectory} onChange={(event) => setBackupDirectory(event.target.value)} required placeholder="Choose an empty folder" /><button className="text-btn" type="button" onClick={chooseBackupDirectory} disabled={backupBusy}>Browse</button></div></label>}<label className="project-field">Backup passphrase<input type="password" value={backupPassphrase} onChange={(event) => setBackupPassphrase(event.target.value)} required minLength={12} maxLength={1024} autoComplete="new-password" placeholder="At least 12 characters" /></label><p className="backup-note">{backupDialog === 'create' ? 'Downloads a .blotbackup file protected by a memory-hard passphrase key.' : 'Choose the .blotbackup file after selecting an empty destination folder.'}</p><div className="modal-actions"><button className="text-btn" type="button" disabled={backupBusy} onClick={() => setBackupDialog(null)}>Cancel</button><button className="primary-btn" type="submit" disabled={backupBusy || !localToken || (backupDialog === 'create' && !currentProject)}>{backupBusy ? 'Working…' : backupDialog === 'create' ? 'Create encrypted backup' : 'Choose backup & restore'}</button></div></form></div>}
+      {termContextMenu?.fileName === activeName && view === 'preview' && <div className="term-context-menu" data-term-context-menu role="menu" aria-label="Highlighted word actions" style={{ left: termContextMenu.x, top: termContextMenu.y }}><button type="button" role="menuitem" onClick={() => applyTermDecision(termContextMenu.target, 'included')}>Include</button><button type="button" role="menuitem" onClick={() => applyTermDecision(termContextMenu.target, 'excluded')}>Exclude</button></div>}
       {toast && <div className="toast show" role="status" aria-live="polite">{toast}</div>}
       {modalOpen && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget) setModalOpen(false); }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">Import into Cedar briefing</h2><p>Files stay on this computer. This browser preview reads TXT, MD, and CSV. Office text extraction requires the local document engine.</p><label className="drop-zone"><strong>Choose a local file</strong><span>Up to 100 MB · no upload or cloud connection</span><input type="file" accept=".txt,.md,.csv,text/plain,text/csv" onChange={handleImport} aria-label="Choose a local text file" /></label><div className="modal-actions"><button className="text-btn" onClick={() => setModalOpen(false)}>Cancel</button></div></div></div>}
       {projectModalOpen && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !projectBusy) setProjectModalOpen(false); }}><form className="modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title" onSubmit={submitProject}><h2 id="project-modal-title">Local project folder</h2><p>Create a new workspace or open an existing Blot project. The folder and encrypted project state stay on this computer.</p><div className="view-switch" role="tablist" aria-label="Project action"><button type="button" className={projectAction === 'create' ? 'active' : ''} role="tab" aria-selected={projectAction === 'create'} onClick={() => setProjectAction('create')}>Create</button><button type="button" className={projectAction === 'open' ? 'active' : ''} role="tab" aria-selected={projectAction === 'open'} onClick={() => setProjectAction('open')}>Open existing</button></div>{projectAction === 'create' && <label className="project-field">Project name<input value={projectName} onChange={(event) => setProjectName(event.target.value)} required maxLength={100} autoFocus /></label>}<label className="project-field">Project folder<input value={projectDirectory} onChange={(event) => setProjectDirectory(event.target.value)} required placeholder="Choose a local folder" /></label><button className="text-btn" type="button" onClick={chooseProjectDirectory} disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : 'Browse on this computer'}</button>{!serviceAvailable && <p role="status">Start FastAPI to create or open a local project.</p>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setProjectModalOpen(false)} disabled={projectBusy}>Cancel</button><button className="primary-btn" type="submit" disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : projectAction === 'create' ? 'Create project' : 'Open project'}</button></div></form></div>}

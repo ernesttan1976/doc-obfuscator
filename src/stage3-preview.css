@@ -16,6 +16,42 @@
   border: 0;
 }
 
+.term-interaction-help {
+  margin: 0;
+  padding: 0 12px 9px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.term-context-menu {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  min-width: 148px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+
+.term-context-menu button {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  color: var(--fg);
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.term-context-menu button:hover,
+.term-context-menu button:focus-visible {
+  outline: none;
+  background: var(--bg);
+}
+
 .manual-candidate-form {
   padding: 12px;
   border-bottom: 1px solid var(--border-soft);
