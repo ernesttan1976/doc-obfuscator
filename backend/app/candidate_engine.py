@@ -22,15 +22,29 @@ CONTEXTUAL_PROPOSAL_THRESHOLD = 0.72
 MAX_CONTEXTS_PER_CANDIDATE = 3
 MAX_CONTEXT_WINDOW_CHARS = 192
 
-# V1 defaults are a review-breadth aid, not a sensitivity score.
-CANDIDATE_LEVELS = {
-    "EMAIL": 1,
-    "PHONE": 1,
-    "DATE": 2,
-    "IDENTIFIER": 2,
-    "NER_ENTITY": 5,
-    "CAPITALIZED_PHRASE": 5,
-    "MANUAL": 1,
+# Default sensitivity scores are heuristics for filtering, not a guarantee that
+# every occurrence has been identified correctly.
+CANDIDATE_SENSITIVITY_LEVELS = {
+    "EMAIL": 10,
+    "PHONE": 9,
+    "DATE": 3,
+    "IDENTIFIER": 8,
+    "CAPITALIZED_PHRASE": 4,
+    "MANUAL": 10,
+}
+NER_LABEL_SENSITIVITY_LEVELS = {
+    "PERSON": 9,
+    "EMAIL": 10,
+    "PHONE": 9,
+    "LOCATION": 8,
+    "ADDRESS": 8,
+    "IDENTIFIER": 8,
+    "ACCOUNT NUMBER": 8,
+    "ORGANIZATION": 6,
+    "ORG": 6,
+    "COMPANY": 6,
+    "DATE": 3,
+    "TIME": 3,
 }
 
 _EMAIL = re.compile(
@@ -220,7 +234,11 @@ def analyze_candidates(
                 "versionId": version_id,
                 "term": term,
                 "category": record["category"],
-                "level": CANDIDATE_LEVELS[str(record["category"])],
+                "level": _sensitivity_level(
+                    str(record["category"]),
+                    record["nerLabels"],
+                    float(record["nerScore"]),
+                ),
                 "source": (
                     "manual" if record["manual"] else "ner" if "ner" in record["sources"] else "pattern"
                 ),
@@ -577,6 +595,18 @@ def _category_priority(category: str) -> int:
         "NER_ENTITY": 2,
         "CAPITALIZED_PHRASE": 3,
     }.get(category, 4)
+
+
+def _sensitivity_level(category: str, ner_labels: set[str], ner_score: float) -> int:
+    if category != "NER_ENTITY":
+        return CANDIDATE_SENSITIVITY_LEVELS.get(category, 5)
+    label_levels = [
+        NER_LABEL_SENSITIVITY_LEVELS.get(label.upper(), 5)
+        for label in ner_labels
+    ]
+    base_level = max(label_levels, default=5)
+    confidence_adjustment = round((max(0.0, min(1.0, ner_score)) - 0.5) * 2)
+    return max(1, min(10, base_level + confidence_adjustment))
 
 
 def _candidate_id(version_id: str, normalized_term: str) -> str:

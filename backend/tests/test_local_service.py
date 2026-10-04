@@ -560,7 +560,7 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
     root = tmp_path / "project"
     source = tmp_path / "brief.md"
     root.mkdir()
-    source.write_bytes(b"Alex Tan contact alex@example.test. Existing [[T_123]] remains.")
+    source.write_bytes(b"Alex Tan contact alex@example.test. Project Cedar remains. Existing [[T_123]] remains.")
     original_bytes = source.read_bytes()
     app, client_context = local_client(tmp_path, MemoryKeyStore())
     async with client_context as client:
@@ -584,12 +584,18 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
             json={**request, "candidate_id": email["id"], "decision": "excluded"},
             headers=headers,
         )
-        denied = await client.post("/api/projects/export-preview", json={**request, "level": 1})
-        preview_response = await client.post(
+        broad_preview_response = await client.post(
             "/api/projects/export-preview",
             json={**request, "level": 1},
             headers=headers,
         )
+        denied = await client.post("/api/projects/export-preview", json={**request, "level": 1})
+        preview_response = await client.post(
+            "/api/projects/export-preview",
+            json={**request, "level": 10},
+            headers=headers,
+        )
+        broad_preview = broad_preview_response.json()
         preview = preview_response.json()
         unacknowledged = await client.post(
             "/api/projects/export",
@@ -622,6 +628,8 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
     assert preview["requiresAcknowledgement"] is True
     assert preview["preexistingPlaceholderCount"] == 1
     assert len(preview["matches"]) == 1
+    assert [match["term"] for match in preview["matches"]] == ["Alex Tan"]
+    assert any(match["term"] == "Project Cedar" for match in broad_preview["matches"])
     assert preview["matches"][0]["term"] == "Alex Tan"
     assert preview["preview"]["text"].startswith("[[T_")
     assert unacknowledged.status_code == 409

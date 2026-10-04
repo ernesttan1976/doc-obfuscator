@@ -30,8 +30,10 @@ Opening a saved TXT or MD shows a local text preview with UTF-8/UTF-16 encoding 
 
 ## Review and export a saved project document
 
+Each candidate is assigned a sensitivity score from 1 (unlikely sensitive) to 10 (very likely sensitive). Set the slider to a minimum score to filter suggestions; Include and Exclude decisions remain available and override the filter.
+
 1. Open or create a local project and import the document. Select the **Original** version in the review toolbar.
-2. Review the coverage report, adjust candidate breadth, include or exclude candidates, confirm or edit similar-term groups, and use Undo as needed. The visible match count follows the selected level and saved decisions.
+2. Review the coverage report, adjust the minimum sensitivity, include or exclude candidates, confirm or edit similar-term groups, and use Undo as needed. The visible match count follows the selected level and saved decisions.
 3. Select **Preview & export obfuscated copy**. Inspect the generated placeholders, occurrence counts, bounded output preview, and coverage warnings. Existing placeholder-like strings and unsupported Office/XLSX content require explicit acknowledgement.
 4. Select **Approve and save new version** to write a distinct obfuscated version under `.blot/outputs/` and download it for manual use. The original remains unchanged. Random placeholders are collision-checked; the term map is written only to encrypted project state, never to the output package.
 5. Use the version selector to inspect the obfuscated copy or download it again. Approval previews expire after 15 minutes and are rejected if the source bytes or version-scoped review graph changed.

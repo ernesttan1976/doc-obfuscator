@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getCandidateDecisionCounts, getSuggestedBelowLevelCount, getVisibleCandidates } from './candidate-review.js';
+import { getCandidateDecisionCounts, getSuggestedBelowSensitivityCount, getVisibleCandidates } from './candidate-review.js';
 import './stage3-preview.css';
 
 const sampleText = [
@@ -149,7 +149,7 @@ export default function App() {
   const candidates = activeFile.candidates || [];
   const matchCount = reviewableProjectDocument
     ? candidates
-      .filter((candidate) => candidate.decision === 'included' || (candidate.decision === 'suggested' && candidate.level <= level))
+      .filter((candidate) => candidate.decision === 'included' || (candidate.decision === 'suggested' && candidate.level >= level))
       .reduce((sum, candidate) => sum + candidate.occurrenceCount, 0)
     : changeRows.reduce((sum, row) => sum + (row.decision === 'excluded' ? 0 : row.occurrences), 0);
   const visibleCandidates = reviewableProjectDocument ? getVisibleCandidates(candidates, level) : [];
@@ -163,7 +163,7 @@ export default function App() {
     ))
   ));
   const candidateDecisionCounts = getCandidateDecisionCounts(candidates);
-  const belowLevelCount = getSuggestedBelowLevelCount(candidates, level);
+  const belowLevelCount = getSuggestedBelowSensitivityCount(candidates, level);
   const previewCoverage = activeFile.previewCoverage;
   const previewWarnings = activeFile.previewWarnings || [];
   const unsupportedPartCount = previewCoverage?.unsupportedPartCount || 0;
@@ -1180,7 +1180,8 @@ export default function App() {
             <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${projectDocuments.length} saved` : `${files.length} items`}</span></div><div className="file-list">{(currentProject ? projectDocuments : files).map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span><span className="file-name">{file.name}</span><span className="file-status">{file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : ''}</span></button>)}{currentProject && projectDocuments.length === 0 && <p className="empty-file-list">No project documents yet.</p>}</div></aside>
             <section className="panel review-panel">
                <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? `${activeVersion.kind === 'original' ? 'Saved original' : activeVersion.kind === 'restored' ? 'Restored copy' : 'Obfuscated copy'} · local preview` : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="review-toolbar-actions">{activeFile.isProjectDocument && <label className="version-select">Version<select aria-label="Select document version" value={activeFile.selectedVersionId || activeFile.versionId} onChange={(event) => selectProjectVersion(event.target.value)}>{(activeFile.versions || []).map((version) => <option key={version.id} value={version.id}>{version.kind === 'original' ? 'Original' : version.kind === 'restored' ? 'Restored' : 'Obfuscated'} · {version.name}</option>)}</select></label>}<div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div></div>
-              {reviewableProjectDocument && <div className="slider-area"><div className="slider-labels"><label htmlFor="sensitivity">Candidate breadth</label><span className="slider-value">Level {level} / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value={level} aria-valuetext={`Level ${level} of 10 candidate breadth`} onChange={(event) => { setExportPreview(null); setLevel(Number(event.target.value)); }} /><div className="range-notes"><span>Narrow · fewer candidate types</span><span>All detected candidates</span></div></div>}
+               {reviewableProjectDocument && <div className="slider-area"><div className="slider-labels"><label htmlFor="sensitivity">Minimum sensitivity</label><span className="slider-value">Level {level} / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value={level} aria-valuetext={`Minimum sensitivity level ${level} of 10`} onChange={(event) => { setExportPreview(null); setLevel(Number(event.target.value)); }} /><div className="range-notes"><span>Show all · 1</span><span>Most sensitive · 10</span></div></div>}
+              {reviewableProjectDocument && <p className="sensitivity-note">Include and Exclude decisions override this filter.</p>}
               {view === 'preview' ? <div className="preview"><div className="preview-note"><span className="status-dot" /><span>{activeFile.isProjectDocument ? (activeFile.candidateLoading ? 'Scanning supported editable text locally…' : `${visibleCandidates.length} candidates shown at level ${level}. Review decisions below; only supported editable text is scanned.`) : `${visibleGroups.length} suggested groups are visible at this level. Click a highlighted term to decide.`}</span></div><article className="doc-page"><div className="doc-kicker">BOARD UPDATE · 04 OCTOBER 2026</div><h2>{activeFile.heading}</h2>{activeFile.content.map((paragraph, index) => <p key={`${activeFile.name}-${index}`}>{renderParagraph(paragraph)}</p>)}<div className="legend"><span className="legend-item"><span className="legend-swatch" />Suggested</span><span className="legend-item"><span className="legend-swatch manual" />Manual decision</span><span className="legend-item">Click a term to inspect its group</span></div></article><div className="preview-foot"><span><strong>{activeFile.isProjectDocument ? visibleCandidates.reduce((sum, candidate) => sum + (candidate.decision === 'excluded' ? 0 : candidate.occurrenceCount), 0) : matchCount}</strong> included or suggested occurrences at level <strong>{level}</strong></span><span>Original stays unchanged</span></div>{undo?.file === activeName && <button className="small-btn undo-button" onClick={undoDecision}>Undo last decision</button>}</div> : <div className="preview changes-pane"><div className="preview-note"><span className="status-dot" /><span>Export diff for version 03</span></div><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr style={{ color: 'var(--muted)', font: '11px var(--font-mono)', textAlign: 'left' }}><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>OCCURRENCE</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>REPLACEMENT</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>DECISION</th></tr></thead><tbody>{changeRows.map(({ group, occurrences, decision }) => <tr key={group.id}><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{group.term} · {occurrences} {occurrences === 1 ? 'match' : 'matches'}</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>[[{group.token}]]</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{decision === 'excluded' ? 'Excluded' : decision === 'included' ? 'Included' : 'Suggested'}</td></tr>)}</tbody></table></div>}
             </section>
             <aside className="right-stack">
@@ -1218,7 +1219,7 @@ export default function App() {
                   <span><strong>{candidateDecisionCounts.suggested}</strong> need review</span>
                   <span><strong>{candidateDecisionCounts.included}</strong> included</span>
                   <span><strong>{candidateDecisionCounts.excluded}</strong> excluded</span>
-                  {belowLevelCount > 0 && <span><strong>{belowLevelCount}</strong> suggested below this level</span>}
+                  {belowLevelCount > 0 && <span><strong>{belowLevelCount}</strong> suggested below this sensitivity</span>}
                   <span><strong>{proposals.length}</strong> proposals not in a group</span>
                 </div>
                 <div className="graph-list">
@@ -1229,7 +1230,7 @@ export default function App() {
                   {activeFile.nerWarning && <p className="candidate-error" role="status">{activeFile.nerWarning}</p>}
                   {activeFile.similarityWarning && <p className="candidate-error" role="status">{activeFile.similarityWarning}</p>}
                   {visibleCandidates.map((candidate) => <div className="graph-card candidate-card" key={candidate.id}>
-                    <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">Level {candidate.level}</span></div>
+                    <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">Sensitivity {candidate.level}/10</span></div>
                     <p className="graph-reason">{candidate.nerLabels?.length ? `NER · ${candidate.nerLabels.join(', ')} · model score ${Math.round((candidate.nerScore || 0) * 100)}%${candidate.source === 'manual' ? ' · manual' : ''}` : `${candidate.category.replaceAll('_', ' ').toLowerCase()} · ${candidate.source}`} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'}</p>
                     {candidate.occurrences[0] && <p className="candidate-location">{candidate.occurrences[0].location}{candidate.occurrencesTruncated ? ' · locations truncated' : ''}</p>}
                     <div className="graph-actions">

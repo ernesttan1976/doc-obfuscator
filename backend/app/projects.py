@@ -227,7 +227,7 @@ class ProjectService:
         level: int,
     ) -> dict[str, object]:
         if not 1 <= level <= 10:
-            raise ProjectError("Candidate breadth must be between 1 and 10.")
+            raise ProjectError("Minimum sensitivity level must be between 1 and 10.")
         root = self._validate_directory(directory)
         parsed, original_version_id, original_bytes, _, _, _, display_name = self._read_document_version(
             root, document_id, None
@@ -237,10 +237,10 @@ class ProjectService:
         selected = [
             node for node in nodes
             if node.get("decision") == "included"
-            or (node.get("decision") == "suggested" and int(node.get("level", 10)) <= level)
+            or (node.get("decision") == "suggested" and int(node.get("level", 10)) >= level)
         ]
         if not selected:
-            raise ProjectError("No candidates are included at this breadth. Include a candidate or raise the level.")
+            raise ProjectError("No candidates meet this sensitivity level. Include a candidate or lower the level.")
 
         replacements, mapping, matches, output_preview = self._prepare_export_replacements(
             parsed,
