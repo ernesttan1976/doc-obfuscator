@@ -35,6 +35,7 @@ from .document_adapters import (
 from .key_store import KeyStoreUnavailable, ProjectKeyStore
 from .local_crypto import atomic_write_private, decrypt_state, encrypt_state
 from .model_manager import ModelManagerError
+from .page_preview import render_docx_to_pdf
 from .portable_backup import (
     PortableBackupError,
     build_archive,
@@ -219,6 +220,18 @@ class ProjectService:
         if report:
             preview["restoreReport"] = report
         return preview
+
+    def preview_document_pages(
+        self,
+        directory: str | Path,
+        document_id: str,
+        version_id: str | None = None,
+    ) -> bytes:
+        root = self._validate_directory(directory)
+        parsed, _, source, _, _, extension, _ = self._read_document_version(root, document_id, version_id)
+        if parsed.format != "DOCX" or extension.lower() != ".docx":
+            raise ProjectError("Page-by-page rendering is available for DOCX documents.")
+        return render_docx_to_pdf(source)
 
     def preview_obfuscation(
         self,

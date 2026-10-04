@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { getCandidateDecisionCounts, getCandidatesNotSelectedAtLevel, getVisibleCandidates } from './candidate-review.js';
 import './stage3-preview.css';
 
@@ -108,6 +109,11 @@ export default function App() {
   const [view, setView] = useState('preview');
   const [denseText, setDenseText] = useState(false);
   const [sectionIndex, setSectionIndex] = useState(0);
+  const [docxPreviewMode, setDocxPreviewMode] = useState('pages');
+  const [pagePreviewDocument, setPagePreviewDocument] = useState(null);
+  const [pagePreviewLoading, setPagePreviewLoading] = useState(false);
+  const [pagePreviewError, setPagePreviewError] = useState('');
+  const pagePreviewCanvas = useRef(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('blot-theme') === 'dark' ? 'dark' : 'light');
   const [modalOpen, setModalOpen] = useState(false);
   const [projectModalOpen, setProjectModalOpen] = useState(false);
@@ -318,6 +324,86 @@ export default function App() {
     document.addEventListener('mouseup', captureSelectedPhrase);
     return () => document.removeEventListener('mouseup', captureSelectedPhrase);
   }, [reviewableProjectDocument]);
+
+  useEffect(() => {
+    const pdfUrl = activeFile?.pagePreviewUrl;
+    if (!pdfUrl) {
+      setPagePreviewDocument(null);
+      setPagePreviewLoading(false);
+      setPagePreviewError(activeFile?.pagePreviewError || '');
+      return undefined;
+    }
+
+    let cancelled = false;
+    let loadingTask;
+    setPagePreviewDocument(null);
+    setPagePreviewLoading(true);
+    setPagePreviewError('');
+    import('pdfjs-dist').then((pdfjsLib) => {
+      if (cancelled) return null;
+      pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
+      loadingTask = pdfjsLib.getDocument({ url: pdfUrl });
+      return loadingTask.promise;
+    }).then((pdf) => {
+      if (!pdf) return;
+      if (cancelled) {
+        void pdf.destroy();
+        return;
+      }
+      setPagePreviewDocument({ url: pdfUrl, pdf });
+      setPagePreviewLoading(false);
+      setFiles((current) => current.map((file) => (
+        file.id === activeFile.id ? { ...file, pagePreviewPageCount: pdf.numPages } : file
+      )));
+    }).catch((error) => {
+      if (cancelled) return;
+      setPagePreviewLoading(false);
+      setPagePreviewError(error.message || 'The rendered page preview could not be opened.');
+    });
+    return () => {
+      cancelled = true;
+      void loadingTask?.destroy();
+    };
+  }, [activeFile?.id, activeFile?.pagePreviewUrl]);
+
+  useEffect(() => {
+    const pdf = pagePreviewDocument?.pdf;
+    const canvas = pagePreviewCanvas.current;
+    if (!pdf || !canvas || pagePreviewDocument.url !== activeFile?.pagePreviewUrl) return undefined;
+
+    let cancelled = false;
+    let renderTask;
+    const renderPage = async () => {
+      const pageNumber = Math.min(Math.max(activeFile.pagePreviewPage || 1, 1), pdf.numPages);
+      const page = await pdf.getPage(pageNumber);
+      if (cancelled) return;
+      const baseViewport = page.getViewport({ scale: 1 });
+      const width = Math.max(240, canvas.parentElement?.clientWidth || baseViewport.width);
+      const scale = Math.min(1.5, (width - 32) / baseViewport.width);
+      const viewport = page.getViewport({ scale });
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.ceil(viewport.width * pixelRatio);
+      canvas.height = Math.ceil(viewport.height * pixelRatio);
+      canvas.style.width = `${Math.ceil(viewport.width)}px`;
+      canvas.style.height = `${Math.ceil(viewport.height)}px`;
+      renderTask = page.render({
+        canvasContext: canvas.getContext('2d'),
+        viewport,
+        transform: pixelRatio === 1 ? null : [pixelRatio, 0, 0, pixelRatio, 0, 0],
+      });
+      await renderTask.promise;
+    };
+    void renderPage().catch((error) => {
+      if (!cancelled && error.name !== 'RenderingCancelledException') {
+        setPagePreviewError(error.message || 'This page could not be rendered.');
+      }
+    });
+    return () => {
+      cancelled = true;
+      renderTask?.cancel();
+    };
+  }, [activeFile?.pagePreviewPage, activeFile?.pagePreviewUrl, pagePreviewDocument]);
+
   useEffect(() => {
     if (!toast) return undefined;
     const timer = window.setTimeout(() => setToast(''), 2600);
@@ -558,6 +644,27 @@ export default function App() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not parse this document for preview');
       const content = previewLines(data);
+      let pagePreviewUrl;
+      let pagePreviewError = '';
+      if (data.format === 'DOCX') {
+        setPagePreviewLoading(true);
+        try {
+          const pageResponse = await fetch('/api/projects/document-page-preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+            body: JSON.stringify({ directory, document_id: documentId, version_id: versionId || undefined }),
+          });
+          if (!pageResponse.ok) {
+            const pageError = await pageResponse.json();
+            throw new Error(pageError.detail || 'The DOCX page preview is not available.');
+          }
+          pagePreviewUrl = URL.createObjectURL(await pageResponse.blob());
+        } catch (error) {
+          pagePreviewError = error.message || 'The DOCX page preview is not available.';
+        } finally {
+          setPagePreviewLoading(false);
+        }
+      }
       const previewSections = (data.previewSections || []).map((section) => {
         const slideMatch = data.format === 'PPTX' && section.part.match(/(?:^|\/)slide(\d+)\.xml$/i);
         return {
@@ -566,6 +673,9 @@ export default function App() {
         };
       });
       const knownFile = files.find((file) => file.id === documentId);
+      if (knownFile?.pagePreviewUrl && knownFile.pagePreviewUrl !== pagePreviewUrl) {
+        URL.revokeObjectURL(knownFile.pagePreviewUrl);
+      }
       const selectedVersionId = versionId || knownFile?.selectedVersionId || knownFile?.versionId;
       const selectedVersion = knownFile?.versions?.find((version) => version.id === selectedVersionId)
         || { kind: versionKind || 'original' };
@@ -586,6 +696,10 @@ export default function App() {
             existingPlaceholderLikeTextCount: data.existingPlaceholderLikeTextCount || 0,
             previewTruncated: data.truncated,
             previewError: false,
+            pagePreviewUrl,
+            pagePreviewError,
+            pagePreviewPage: 1,
+            pagePreviewPageCount: undefined,
             previewLoaded: true,
             previewLoading: false,
             selectedVersionId,
@@ -598,6 +712,7 @@ export default function App() {
           }
           : file
       )));
+      setDocxPreviewMode(pagePreviewUrl ? 'pages' : 'text');
       if ((selectedVersion?.kind || 'original') === 'original') await loadProjectDocumentCandidates(documentId, [], directory);
     } catch (error) {
       setFiles((current) => current.map((file) => (
@@ -617,6 +732,14 @@ export default function App() {
       file.id === activeFile.id
         ? { ...file, content: previewSections[nextIndex].content }
         : file
+    )));
+  };
+
+  const selectDocxPage = (pageNumber) => {
+    const pageCount = activeFile.pagePreviewPageCount || 1;
+    const nextPage = Math.min(Math.max(pageNumber, 1), pageCount);
+    setFiles((current) => current.map((file) => (
+      file.id === activeFile.id ? { ...file, pagePreviewPage: nextPage } : file
     )));
   };
 
@@ -1327,7 +1450,7 @@ export default function App() {
   };
 
   return (
-    <div className="app-shell" data-project-preview={activeFile.isProjectDocument ? 'true' : undefined} data-preview-error={activeFile.previewError ? 'true' : undefined} data-dense-text={denseText ? 'true' : undefined}>
+    <div className="app-shell" data-project-preview={activeFile.isProjectDocument ? 'true' : undefined} data-preview-error={activeFile.previewError ? 'true' : undefined} data-dense-text={denseText ? 'true' : undefined} data-docx-page-view={view === 'preview' && activeFile.isProjectDocument && activeFile.previewFormat === 'DOCX' && docxPreviewMode === 'pages' ? 'true' : undefined}>
       <aside className="sidebar" data-od-id="sidebar">
         <div className="brand-row"><div className="brand-mark" aria-hidden="true">B</div><div><div className="brand-name">Blot</div><div className="brand-sub">private document workspace</div></div></div>
         <div className="side-section"><div className="side-label">Workspace</div><button className="side-link active" onClick={() => setToast('Review queue opened')}><span className="side-icon">◈</span> Review queue</button><button className="side-link" onClick={() => setToast('Showing all project files')}><span className="side-icon">□</span> All files <span style={{ marginLeft: 'auto', fontSize: 11 }}>{files.length}</span></button><button className="side-link" onClick={() => setToast('Activity is up to date')}><span className="side-icon">↺</span> Activity</button></div>
@@ -1344,9 +1467,23 @@ export default function App() {
             <section className="panel review-panel">
                <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? `${activeVersion.kind === 'original' ? 'Saved original' : activeVersion.kind === 'restored' ? 'Restored copy' : 'Obfuscated copy'} · local preview` : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="review-toolbar-actions">{activeFile.isProjectDocument && <label className="version-select">Version<select aria-label="Select document version" value={activeFile.selectedVersionId || activeFile.versionId} onChange={(event) => selectProjectVersion(event.target.value)}>{(activeFile.versions || []).map((version) => <option key={version.id} value={version.id}>{version.kind === 'original' ? 'Original' : version.kind === 'restored' ? 'Restored' : 'Obfuscated'} · {version.name}</option>)}</select></label>}<div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div></div>
                 {reviewableProjectDocument && <div className="priority-area"><fieldset className="priority-fieldset"><legend>Obfuscation level</legend><div className="priority-scale" aria-hidden="true"><span>1 · 0%</span><strong>Level {level}</strong><span>10 · 100%</span></div><input className="priority-slider" type="range" min="1" max="10" step="1" value={level} aria-label="Obfuscation level" aria-valuetext={`Level ${level}: ${level === 1 ? '0% obfuscation; no terms selected' : level === 10 ? '100% obfuscation; priorities 2 through 10 selected' : `priorities 2 through ${level} selected`}`} onChange={(event) => { setExportPreview(null); setLevel(Number(event.target.value)); }} /><p className="priority-help">Priorities run from 2 (most sensitive) to 10 (least sensitive). Level 1 selects none; level 10 selects priorities 2–10.</p></fieldset></div>}
-              {reviewableProjectDocument && <p className="sensitivity-note">Include and Exclude decisions apply only to candidates selected at this level.</p>}
-               {view === 'preview' && <p className="term-interaction-help">Click a highlighted word to include · double-click to exclude · right-click for options.</p>}
-               {view === 'preview' && previewSections.length > 1 && <div className="preview-navigation preview-navigation-main" role="group" aria-label="Preview section navigation" aria-describedby="preview-page-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}>
+                {reviewableProjectDocument && <p className="sensitivity-note">Include and Exclude decisions apply only to candidates selected at this level.</p>}
+                {view === 'preview' && <p className="term-interaction-help">Click a highlighted word to include · double-click to exclude · right-click for options.</p>}
+                {view === 'preview' && activeFile.isProjectDocument && activeFile.previewFormat === 'DOCX' && <div className="docx-preview-switch" role="group" aria-label="DOCX preview mode"><button className={docxPreviewMode === 'pages' ? 'active' : ''} type="button" aria-pressed={docxPreviewMode === 'pages'} onClick={() => setDocxPreviewMode('pages')}>Page view</button><button className={docxPreviewMode === 'text' ? 'active' : ''} type="button" aria-pressed={docxPreviewMode === 'text'} onClick={() => setDocxPreviewMode('text')}>Text view</button></div>}
+                {view === 'preview' && activeFile.isProjectDocument && activeFile.previewFormat === 'DOCX' && docxPreviewMode === 'pages' && <div className="preview page-preview-shell">
+                  <div className="preview-note"><span className="status-dot" /><span>Word-compatible page layout · original document remains unchanged.</span></div>
+                  {activeFile.pagePreviewPageCount > 0 && <div className="docx-page-navigation" role="group" aria-label="DOCX page navigation">
+                    <button className="small-btn" type="button" onClick={() => selectDocxPage((activeFile.pagePreviewPage || 1) - 1)} disabled={(activeFile.pagePreviewPage || 1) <= 1}>← Previous page</button>
+                    <span aria-live="polite">Page <strong>{activeFile.pagePreviewPage || 1}</strong> of <strong>{activeFile.pagePreviewPageCount}</strong></span>
+                    <button className="small-btn" type="button" onClick={() => selectDocxPage((activeFile.pagePreviewPage || 1) + 1)} disabled={(activeFile.pagePreviewPage || 1) >= activeFile.pagePreviewPageCount}>Next page →</button>
+                  </div>}
+                  <div className="docx-page-canvas-wrapper">
+                    {pagePreviewLoading && <p role="status">Preparing page preview…</p>}
+                    {pagePreviewError && <p className="docx-page-error" role="status">{pagePreviewError} <button className="small-btn" type="button" onClick={() => setDocxPreviewMode('text')}>Open text preview</button></p>}
+                    {!pagePreviewLoading && !pagePreviewError && pagePreviewDocument?.url === activeFile.pagePreviewUrl && <canvas ref={pagePreviewCanvas} className="docx-page-canvas" aria-label={`Page ${activeFile.pagePreviewPage || 1}`} />}
+                  </div>
+                </div>}
+                {view === 'preview' && previewSections.length > 1 && <div className="preview-navigation preview-navigation-main" role="group" aria-label="Preview section navigation" aria-describedby="preview-page-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}>
                  <span className="sr-only" id="preview-page-navigation-help">Use Left or Right Arrow to move between preview sections, or Home and End to jump to the first and last sections.</span>
                  <button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex - 1)} disabled={sectionIndex <= 0} aria-label="Previous preview section">← Previous</button>
                  <span aria-live="polite"><strong>Section {sectionIndex + 1} of {previewSections.length}</strong><small>{activeSection?.label}</small></span>

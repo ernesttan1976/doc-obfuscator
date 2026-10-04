@@ -26,6 +26,7 @@ from .folder_picker import (
 )
 from .key_store import KeyStoreUnavailable, OSKeyringProjectKeyStore, ProjectKeyStore
 from .model_manager import LocalModelManager, ModelManagerError
+from .page_preview import PagePreviewError
 from .projects import ProjectError, ProjectService
 from .similarity_manager import LocalSimilarityManager
 
@@ -400,6 +401,26 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ProjectError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/document-page-preview")
+    def preview_project_document_pages(payload: PreviewDocumentRequest) -> Response:
+        try:
+            pdf = project_service().preview_document_pages(
+                payload.directory,
+                payload.document_id,
+                payload.version_id,
+            )
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except PagePreviewError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(
+            content=pdf,
+            media_type="application/pdf",
+            headers={"Cache-Control": "no-store, private"},
+        )
 
     @app.post("/api/projects/export-preview")
     def preview_project_obfuscation(payload: ExportPreviewRequest) -> dict[str, object]:

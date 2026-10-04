@@ -445,6 +445,104 @@
   outline-offset: 2px;
 }
 
+.docx-preview-switch {
+  display: flex;
+  gap: 4px;
+  width: fit-content;
+  margin: 0 12px 12px;
+  padding: 3px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.docx-preview-switch button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.docx-preview-switch button.active {
+  color: var(--fg);
+  background: var(--bg);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+}
+
+.docx-preview-switch button:focus-visible,
+.docx-page-navigation button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.app-shell[data-docx-page-view='true'] .review-panel > .preview:not(.page-preview-shell),
+.app-shell[data-docx-page-view='true'] .preview-navigation,
+.app-shell[data-docx-page-view='true'] .term-interaction-help {
+  display: none;
+}
+
+.page-preview-shell {
+  padding-top: 12px;
+}
+
+.docx-page-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin: 12px auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.docx-page-navigation strong {
+  color: var(--fg);
+}
+
+.docx-page-canvas-wrapper {
+  display: flex;
+  min-height: 430px;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.docx-page-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  box-shadow: 0 5px 24px rgb(0 0 0 / 18%);
+}
+
+.docx-page-canvas-wrapper > p {
+  margin: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.docx-page-error {
+  max-width: 560px;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  line-height: 1.5;
+}
+
+.docx-page-error .small-btn {
+  margin: 10px 0 0;
+}
+
 .workspace[data-empty-project='true'] > :not(.empty-project-message) {
   display: none;
 }

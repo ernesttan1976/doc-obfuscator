@@ -12,6 +12,7 @@ import pytest
 
 from backend.app import folder_picker
 from backend.app import main as main_module
+from backend.app import projects as projects_module
 from backend.app.key_store import KeyStoreUnavailable
 from backend.app.local_crypto import EncryptedStateError, decrypt_state, encrypt_state
 from backend.app.main import create_app
@@ -433,6 +434,37 @@ async def test_document_preview_is_token_protected_and_returns_parsed_content(tm
     assert office_preview.json()["previewSections"] == [
         {"part": "word/document.xml", "text": "Office preview content"}
     ]
+
+
+@pytest.mark.anyio
+async def test_docx_page_preview_is_token_protected_and_returns_private_pdf(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    source = tmp_path / "brief.docx"
+    root.mkdir()
+    source.write_bytes(minimal_docx())
+    monkeypatch.setattr(projects_module, "render_docx_to_pdf", lambda _: b"%PDF-1.7\npage preview")
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        headers = {"X-Local-App-Token": app.state.local_token}
+        await client.post(
+            "/api/projects",
+            json={"name": "Project", "directory": str(root)},
+            headers=headers,
+        )
+        imported = await client.post(
+            "/api/projects/documents",
+            json={"directory": str(root), "files": [str(source)]},
+            headers=headers,
+        )
+        payload = {"directory": str(root), "document_id": imported.json()["documents"][0]["id"]}
+        denied = await client.post("/api/projects/document-page-preview", json=payload)
+        preview = await client.post("/api/projects/document-page-preview", json=payload, headers=headers)
+
+    assert denied.status_code == 401
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == "application/pdf"
+    assert preview.headers["cache-control"] == "no-store, private"
+    assert preview.content == b"%PDF-1.7\npage preview"
 
 
 @pytest.mark.anyio
