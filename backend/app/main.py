@@ -25,6 +25,7 @@ from .folder_picker import (
 from .key_store import KeyStoreUnavailable, OSKeyringProjectKeyStore, ProjectKeyStore
 from .model_manager import LocalModelManager, ModelManagerError
 from .projects import ProjectError, ProjectService
+from .similarity_manager import LocalSimilarityManager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "dist"
@@ -134,8 +135,15 @@ def create_app(
     dev_origins = _configured_dev_origins()
     app.state.local_token = local_token
     app.state.model_manager = LocalModelManager(models_directory)
+    app.state.similarity_manager = LocalSimilarityManager(models_directory)
     app.state.project_service = (
-        ProjectService(key_store, app.state.model_manager.extract_entities) if key_store is not None else None
+        ProjectService(
+            key_store,
+            app.state.model_manager.extract_entities,
+            app.state.similarity_manager.propose,
+        )
+        if key_store is not None
+        else None
     )
 
     app.add_middleware(
@@ -195,10 +203,30 @@ def create_app(
         except ModelManagerError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.get("/api/models/minilm/status")
+    def minilm_model_status() -> dict[str, object]:
+        return app.state.similarity_manager.status()
+
+    @app.post("/api/models/minilm/download")
+    def download_minilm_model(payload: ModelDownloadRequest) -> dict[str, object]:
+        try:
+            return app.state.similarity_manager.start_download(payload.confirmed)
+        except ModelManagerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/models/minilm/download")
+    def cancel_minilm_model_download() -> dict[str, object]:
+        try:
+            return app.state.similarity_manager.cancel_download()
+        except ModelManagerError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     def project_service() -> ProjectService:
         if app.state.project_service is None:
             app.state.project_service = ProjectService(
-                OSKeyringProjectKeyStore(), app.state.model_manager.extract_entities
+                OSKeyringProjectKeyStore(),
+                app.state.model_manager.extract_entities,
+                app.state.similarity_manager.propose,
             )
         return app.state.project_service
 

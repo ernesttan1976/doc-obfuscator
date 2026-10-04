@@ -5,6 +5,9 @@ from backend.app.candidate_engine import (
     CandidateError,
     analyze_candidates,
     blocks_for_document,
+    merge_proposals,
+    propose_contextual_variants,
+    propose_variants,
 )
 from backend.app.document_adapters import (
     DocumentCell,
@@ -86,6 +89,98 @@ def test_ner_entities_become_suggestions_and_enrich_matching_pattern_candidates(
     assert by_term["Alex Tan"]["nerScore"] == 0.91
     assert by_term["Example Corp"]["source"] == "ner"
     assert "Wrong text" not in by_term
+
+
+def test_contextual_proposals_embed_masked_context_and_remain_unconfirmed():
+    text = (
+        "Alex Tan, the senior engineer, signed the confidential report. "
+        "Jordan Lee, the senior engineer, approved the final budget."
+    )
+    block = CandidateBlock("text", text)
+    candidates, _ = analyze_candidates([block], "doc-1", "version-1")
+    embedded_contexts = []
+
+    def embed(contexts):
+        embedded_contexts.extend(contexts)
+        return [[1.0, 0.0] if "senior engineer" in context else [0.0, 1.0] for context in contexts]
+
+    proposals = propose_contextual_variants(candidates, [block], embed)
+    by_term = {candidate["term"]: candidate for candidate in candidates}
+    name_pair = {by_term["Alex Tan"]["id"], by_term["Jordan Lee"]["id"]}
+    proposal = next(
+        proposal for proposal in proposals
+        if {proposal["sourceId"], proposal["targetId"]} == name_pair
+    )
+
+    assert embedded_contexts
+    assert all("Alex Tan" not in context and "Jordan Lee" not in context for context in embedded_contexts)
+    assert proposal["method"] == "minilm"
+    assert proposal["score"] == 100.0
+    assert proposal["status"] == "proposed"
+    assert proposal["confirmed"] is False
+    assert "masked" in proposal["reason"]
+
+
+def test_contextual_proposals_skip_mentions_without_unmasked_context():
+    block = CandidateBlock("text", "Alex Tan\nJordan Lee")
+    candidates, _ = analyze_candidates([block], "doc-1", "version-1")
+
+    assert all("\n" not in candidate["term"] for candidate in candidates)
+
+    def unused_embedder(contexts):
+        pytest.fail(f"No useful context should be encoded: {contexts}")
+
+    assert propose_contextual_variants(candidates, [block], unused_embedder) == []
+
+
+def test_contextual_proposals_reject_unrelated_contexts_below_cosine_threshold():
+    block = CandidateBlock(
+        "text",
+        "Alex Tan reported a network outage. Jordan Lee enjoys gardening.",
+    )
+    candidates, _ = analyze_candidates([block], "doc-1", "version-1")
+
+    proposals = propose_contextual_variants(
+        candidates,
+        [block],
+        lambda contexts: [
+            [1.0, 0.0] if "network outage" in context else [0.0, 1.0]
+            for context in contexts
+        ],
+    )
+
+    names = {candidate["term"]: candidate["id"] for candidate in candidates}
+    assert not any(
+        {proposal["sourceId"], proposal["targetId"]} == {names["Alex Tan"], names["Jordan Lee"]}
+        for proposal in proposals
+    )
+
+
+def test_rapidfuzz_and_minilm_evidence_merge_into_one_review_edge():
+    nodes = [
+        {"id": "candidate-a", "term": "Alex Tan"},
+        {"id": "candidate-b", "term": "Alex Tann"},
+    ]
+    lexical = propose_variants(nodes)
+    contextual = [{
+        "id": "minilm-edge",
+        "sourceId": "candidate-a",
+        "targetId": "candidate-b",
+        "score": 91.0,
+        "method": "minilm",
+        "scores": {"minilm": 91.0},
+        "reason": "MiniLM contextual similarity (91.0% cosine; candidate mentions masked)",
+        "status": "proposed",
+        "confirmed": False,
+    }]
+
+    merged = merge_proposals(lexical, contextual)
+
+    assert len(merged) == 1
+    assert merged[0]["method"] == "combined"
+    assert merged[0]["scores"] == {"rapidfuzz": lexical[0]["score"], "minilm": 91.0}
+    assert merged[0]["methods"] == ["minilm", "rapidfuzz"]
+    assert merged[0]["confirmed"] is False
 
 
 def test_manual_phrase_must_exist_in_supported_text():

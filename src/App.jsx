@@ -104,6 +104,7 @@ export default function App() {
   const [localToken, setLocalToken] = useState('');
   const [serviceAvailable, setServiceAvailable] = useState(false);
   const [nerModelStatus, setNerModelStatus] = useState(null);
+  const [minilmModelStatus, setMinilmModelStatus] = useState(null);
   const [currentProject, setCurrentProject] = useState(null);
   const [projectBusy, setProjectBusy] = useState(false);
   const [manualPhrase, setManualPhrase] = useState('');
@@ -167,17 +168,25 @@ export default function App() {
     let timer;
     const refreshModelStatus = async () => {
       try {
-        const response = await fetch('/api/models/ner/status', {
-          headers: { 'X-Local-App-Token': localToken },
-          cache: 'no-store',
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || 'Could not check local NER model status');
+        const headers = { 'X-Local-App-Token': localToken };
+        const [nerResponse, minilmResponse] = await Promise.all([
+          fetch('/api/models/ner/status', { headers, cache: 'no-store' }),
+          fetch('/api/models/minilm/status', { headers, cache: 'no-store' }),
+        ]);
+        const [ner, minilm] = await Promise.all([nerResponse.json(), minilmResponse.json()]);
+        if (!nerResponse.ok) throw new Error(ner.detail || 'Could not check local NER model status');
+        if (!minilmResponse.ok) throw new Error(minilm.detail || 'Could not check local MiniLM model status');
         if (cancelled) return;
-        setNerModelStatus(data);
-        if (data.status === 'downloading') timer = window.setTimeout(refreshModelStatus, 1000);
+        setNerModelStatus(ner);
+        setMinilmModelStatus(minilm);
+        if (ner.status === 'downloading' || minilm.status === 'downloading') {
+          timer = window.setTimeout(refreshModelStatus, 1000);
+        }
       } catch (error) {
-        if (!cancelled) setNerModelStatus({ status: 'unavailable', error: error.message });
+        if (!cancelled) {
+          setNerModelStatus({ status: 'unavailable', error: error.message });
+          setMinilmModelStatus({ status: 'unavailable', error: error.message });
+        }
       }
     };
     void refreshModelStatus();
@@ -185,7 +194,7 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [localToken, nerModelStatus?.status]);
+  }, [localToken, nerModelStatus?.status, minilmModelStatus?.status]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -274,6 +283,7 @@ export default function App() {
             nerTruncated: data.nerTruncated || false,
             nerCandidateCount: data.nerCandidateCount || 0,
             nerWarning: data.nerWarning || '',
+            similarityWarning: data.similarityWarning || '',
             candidateLoaded: true,
             candidateLoading: false,
             candidateError: '',
@@ -316,6 +326,36 @@ export default function App() {
       setNerModelStatus(data);
     } catch (error) {
       setNerModelStatus((current) => ({ ...(current || {}), error: error.message }));
+    }
+  };
+
+  const downloadMiniLMModel = async () => {
+    if (!localToken || !window.confirm('Download the Apache-2.0 MiniLM model and tokenizer (~92 MB) now? This starts a network download. The model processes masked local context only; document text is not uploaded.')) return;
+    try {
+      const response = await fetch('/api/models/minilm/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not start the MiniLM download');
+      setMinilmModelStatus(data);
+    } catch (error) {
+      setMinilmModelStatus((current) => ({ ...(current || {}), status: 'failed', error: error.message }));
+    }
+  };
+
+  const cancelMiniLMModelDownload = async () => {
+    try {
+      const response = await fetch('/api/models/minilm/download', {
+        method: 'DELETE',
+        headers: { 'X-Local-App-Token': localToken },
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not cancel the MiniLM download');
+      setMinilmModelStatus(data);
+    } catch (error) {
+      setMinilmModelStatus((current) => ({ ...(current || {}), error: error.message }));
     }
   };
 
@@ -737,6 +777,15 @@ export default function App() {
                   {nerModelStatus?.error && <p className="candidate-error" role="alert">{nerModelStatus.error}</p>}
                   <small className="ner-model-note">Apache-2.0 · pinned files · explicit download · may use several GB RAM · suggestions only</small>
                 </div>
+                <div className="ner-model-panel" aria-label="Local MiniLM contextual similarity model">
+                  <div className="ner-model-heading"><strong>Contextual similarity · MiniLM</strong><span role="status" aria-live="polite">{minilmModelStatus?.installed ? (minilmModelStatus.runtimeAvailable ? 'Installed · offline ready' : 'Model installed · runtime setup needed') : minilmModelStatus?.status === 'downloading' ? 'Downloading model…' : 'Not downloaded · RapidFuzz remains active'}</span></div>
+                  {minilmModelStatus?.status === 'downloading' && <div className="ner-download-progress"><progress max={minilmModelStatus.totalBytes || minilmModelStatus.sizeBytes || 1} value={minilmModelStatus.downloadedBytes || 0} aria-label="MiniLM model download progress" /><span>{Math.floor(100 * (minilmModelStatus.downloadedBytes || 0) / (minilmModelStatus.totalBytes || minilmModelStatus.sizeBytes || 1))}%</span><button className="small-btn" type="button" onClick={cancelMiniLMModelDownload}>Cancel</button></div>}
+                  {!minilmModelStatus?.installed && minilmModelStatus?.status !== 'downloading' && <button className="small-btn ner-download-button" type="button" onClick={downloadMiniLMModel} disabled={!localToken}>Download MiniLM and tokenizer · ~92 MB</button>}
+                  {minilmModelStatus?.installed && !minilmModelStatus.runtimeAvailable && <p className="ner-model-note">Install with <code>uv sync --extra models</code>, then reload the app to enable offline similarity.</p>}
+                  {minilmModelStatus?.error && <p className="candidate-error" role="alert">{minilmModelStatus.error}</p>}
+                  <small className="ner-model-note">Apache-2.0 · pinned files · explicit download · entity mentions are masked · suggestions only</small>
+                  {minilmModelStatus?.installed && minilmModelStatus.runtimeAvailable && activeFile.candidateLoaded && <button className="small-btn" type="button" disabled={activeFile.candidateLoading} onClick={() => loadProjectDocumentCandidates(activeFile.id)}>Re-scan for contextual proposals</button>}
+                </div>
                 <label className="dense-toggle"><input type="checkbox" checked={denseText} onChange={(event) => setDenseText(event.target.checked)} /> Dense text view</label>
                 {previewSections.length > 1 && <div className="preview-navigation" role="group" aria-label="Preview section navigation" aria-describedby="preview-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}>
                   <span className="sr-only" id="preview-navigation-help">Use Left or Right Arrow to move between sections, or Home and End to jump to the first and last sections.</span>
@@ -761,6 +810,7 @@ export default function App() {
                   {activeFile.candidateLimitReached && <p className="candidate-limit">Candidate or proposal list reached its display limit.</p>}
                   {activeFile.nerTruncated && <p className="candidate-limit" role="status">The local NER scan was capped at 250,000 supported-text characters; some text was not analyzed by the model.</p>}
                   {activeFile.nerWarning && <p className="candidate-error" role="status">{activeFile.nerWarning}</p>}
+                  {activeFile.similarityWarning && <p className="candidate-error" role="status">{activeFile.similarityWarning}</p>}
                   {visibleCandidates.map((candidate) => <div className="graph-card candidate-card" key={candidate.id}>
                     <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">Level {candidate.level}</span></div>
                     <p className="graph-reason">{candidate.nerLabels?.length ? `NER · ${candidate.nerLabels.join(', ')} · model score ${Math.round((candidate.nerScore || 0) * 100)}%${candidate.source === 'manual' ? ' · manual' : ''}` : `${candidate.category.replaceAll('_', ' ').toLowerCase()} · ${candidate.source}`} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'}</p>

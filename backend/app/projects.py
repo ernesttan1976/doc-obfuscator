@@ -19,6 +19,7 @@ from .candidate_engine import (
     analyze_candidates,
     blocks_for_document,
     decide_candidate,
+    merge_proposals,
 )
 from .document_adapters import parse_document
 from .key_store import KeyStoreUnavailable, ProjectKeyStore
@@ -74,9 +75,13 @@ class ProjectService:
         self,
         key_store: ProjectKeyStore,
         entity_extractor: Callable[[tuple[CandidateBlock, ...]], tuple[list[dict[str, object]], bool]] | None = None,
+        contextual_proposer: Callable[
+            [tuple[CandidateBlock, ...], list[dict[str, object]]], list[dict[str, object]]
+        ] | None = None,
     ) -> None:
         self.key_store = key_store
         self.entity_extractor = entity_extractor
+        self.contextual_proposer = contextual_proposer
 
     def create(self, directory: str | Path, name: str) -> ProjectSummary:
         root = self._validate_directory(directory)
@@ -194,6 +199,14 @@ class ProjectService:
             [*retained_manual_terms, *(manual_terms or [])],
             ner_entities=ner_entities,
         )
+        similarity_warning = None
+        contextual_proposals = []
+        try:
+            if self.contextual_proposer:
+                contextual_proposals = self.contextual_proposer(blocks, candidates)
+        except ModelManagerError:
+            similarity_warning = "The local MiniLM model could not run; RapidFuzz proposals remain available."
+        proposals = merge_proposals(proposals, contextual_proposals)
         old_ids = {node["id"] for node in existing_nodes}
         graph["nodes"] = [node for node in nodes if node.get("id") not in old_ids] + candidates
         graph["edges"] = [
@@ -216,6 +229,8 @@ class ProjectService:
             "nerTruncated": ner_truncated,
             "nerCandidateCount": sum(node.get("source") == "ner" for node in candidates),
             "nerWarning": ner_warning,
+            "similarityProposalCount": sum("minilm" in proposal.get("scores", {}) for proposal in proposals),
+            "similarityWarning": similarity_warning,
         }
 
     def set_candidate_decision(
