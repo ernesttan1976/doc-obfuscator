@@ -11,6 +11,8 @@ from backend.app.document_adapters import (
 )
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 
 def make_xlsx(*, unsafe_name=None):
@@ -58,6 +60,23 @@ def make_xlsx(*, unsafe_name=None):
 def read_xlsx_part(data, name):
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         return archive.read(name)
+
+
+def make_office_package(extension, parts, *, unsafe_name=None):
+    main_part = "word/document.xml" if extension == ".docx" else "ppt/presentation.xml"
+    package_parts = {
+        "[Content_Types].xml": b"""<?xml version='1.0' encoding='UTF-8'?>
+            <Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'/>""",
+        main_part: parts.pop(main_part),
+        **parts,
+    }
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in package_parts.items():
+            archive.writestr(name, data)
+        if unsafe_name:
+            archive.writestr(unsafe_name, b"unsafe")
+    return output.getvalue(), package_parts
 
 
 def test_text_adapter_preserves_utf8_bom_and_mixed_line_endings():
@@ -191,3 +210,101 @@ def test_xlsx_adapter_rejects_path_traversal_and_external_entities():
             changed.writestr(name, value)
     with pytest.raises(DocumentAdapterError, match="XML|unsafe"):
         parse_document(output.getvalue(), ".xlsx")
+
+
+def test_docx_adapter_scans_parts_replaces_split_and_repeated_text_and_preserves_structure():
+    source, original_parts = make_office_package(
+        ".docx",
+        {
+            "word/document.xml": f"""<?xml version='1.0' encoding='UTF-8'?>
+                <w:document xmlns:w='{WORD_NS}' xmlns:a='{DRAWING_NS}'
+                  xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006'
+                  xmlns:w14='http://schemas.microsoft.com/office/word/2010/wordml'
+                  mc:Ignorable='w14'><w:body>
+                  <w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Alex</w:t></w:r>
+                    <w:r><w:t xml:space='preserve'> Tan</w:t></w:r></w:p>
+                  <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Project Cedar</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+                  <w:p><w:r><w:t>Alex Tan</w:t></w:r></w:p>
+                </w:body></w:document>""".encode(),
+            "word/header1.xml": f"<w:hdr xmlns:w='{WORD_NS}'><w:p><w:r><w:t>Alex Tan</w:t></w:r></w:p></w:hdr>".encode(),
+            "word/comments.xml": f"<w:comments xmlns:w='{WORD_NS}'><w:comment><w:p><w:r><w:t>Alex Tan</w:t></w:r></w:p></w:comment></w:comments>".encode(),
+            "customXml/item1.xml": b"<custom><sensitiveField>Alex Tan</sensitiveField></custom>",
+            "docProps/core.xml": b"<core><title>Alex Tan</title></core>",
+            "word/media/picture.bin": b"binary image payload",
+        },
+    )
+    parsed = parse_document(source, ".docx")
+    preview = parsed.to_public_dict()
+    assert preview["format"] == "DOCX"
+    assert parsed.text == "Alex Tan\nProject Cedar\nAlex Tan\nAlex Tan\nAlex Tan"
+    assert preview["existingPlaceholderLikeTextCount"] == 0
+    assert preview["coverage"]["examinedXmlPartCount"] == 6
+    assert "word/document.xml" in preview["coverage"]["examinedXmlParts"]
+    assert "word/media/picture.bin" in preview["coverage"]["skippedParts"]
+    assert "word/header1.xml" in preview["coverage"]["textParts"]
+    assert "word/comments.xml" in preview["coverage"]["textParts"]
+    assert set(preview["coverage"]["unsupportedParts"]) >= {
+        "customXml/item1.xml",
+        "docProps/core.xml",
+        "word/media/picture.bin",
+    }
+
+    replaced = serialize_with_replacements(parsed, {"Alex Tan": "[[T_001]]", "Project Cedar": "[[T_002]]"})
+    round_tripped = serialize_with_replacements(
+        parse_document(replaced, ".docx"), {"[[T_001]]": "Alex Tan", "[[T_002]]": "Project Cedar"}
+    )
+    rewritten = parse_document(replaced, ".docx")
+    assert rewritten.text == "[[T_001]]\n[[T_002]]\n[[T_001]]\n[[T_001]]\n[[T_001]]"
+    assert parse_document(round_tripped, ".docx").text == parsed.text
+    document_xml_bytes = read_xlsx_part(replaced, "word/document.xml")
+    document_xml = SafeET.fromstring(document_xml_bytes)
+    assert b"mc:Ignorable=\"w14\"" in document_xml_bytes
+    assert b"xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"" in document_xml_bytes
+    runs = document_xml.findall(f".//{{{WORD_NS}}}p[1]/{{{WORD_NS}}}r")
+    assert runs[0].find(f"{{{WORD_NS}}}rPr/{{{WORD_NS}}}b") is not None
+    assert runs[0].find(f"{{{WORD_NS}}}t").text == "[[T_001]]"
+    assert runs[1].find(f"{{{WORD_NS}}}t").text is None
+    assert read_xlsx_part(replaced, "customXml/item1.xml") == original_parts["customXml/item1.xml"]
+    assert read_xlsx_part(replaced, "docProps/core.xml") == original_parts["docProps/core.xml"]
+    assert read_xlsx_part(replaced, "word/media/picture.bin") == original_parts["word/media/picture.bin"]
+    assert read_xlsx_part(source, "word/document.xml") == original_parts["word/document.xml"]
+
+
+def test_pptx_adapter_scans_slide_and_notes_and_keeps_untouched_parts_byte_identical():
+    source, original_parts = make_office_package(
+        ".pptx",
+        {
+            "ppt/presentation.xml": f"<p:presentation xmlns:p='http://schemas.openxmlformats.org/presentationml/2006/main' xmlns:a='{DRAWING_NS}'/>".encode(),
+            "ppt/slides/slide1.xml": f"""<p:sld xmlns:p='http://schemas.openxmlformats.org/presentationml/2006/main'
+                xmlns:a='{DRAWING_NS}'><p:cSld><p:spTree><p:sp><p:txBody><a:bodyPr/><a:lstStyle/>
+                <a:p><a:r><a:rPr/><a:t>Project </a:t></a:r><a:r><a:rPr/><a:t>Cedar</a:t></a:r></a:p>
+                <a:p><a:r><a:t>Project Cedar</a:t></a:r></a:p>
+                </p:txBody></p:sp></p:spTree></p:cSld></p:sld>""".encode(),
+            "ppt/notesSlides/notesSlide1.xml": f"<p:notes xmlns:p='http://schemas.openxmlformats.org/presentationml/2006/main' xmlns:a='{DRAWING_NS}'><p:sp><p:txBody><a:p><a:r><a:t>Alex Tan</a:t></a:r></a:p></p:txBody></p:sp></p:notes>".encode(),
+            "ppt/slides/_rels/slide1.xml.rels": b"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Target='https://example.invalid' TargetMode='External'/></Relationships>",
+            "ppt/media/picture.bin": b"synthetic picture bytes",
+        },
+    )
+    parsed = parse_document(source, ".pptx")
+
+    assert parsed.text == "Project Cedar\nProject Cedar\nAlex Tan"
+    output = serialize_with_replacements(parsed, {"Project Cedar": "[[T_002]]", "Alex Tan": "[[T_001]]"})
+    preview = parse_document(output, ".pptx").to_public_dict()
+    assert preview["text"] == "[[T_002]]\n[[T_002]]\n[[T_001]]"
+    assert any("external relationship targets" in warning for warning in preview["warnings"])
+    assert "ppt/slides/_rels/slide1.xml.rels" in preview["coverage"]["skippedParts"]
+    assert read_xlsx_part(output, "ppt/slides/_rels/slide1.xml.rels") == original_parts["ppt/slides/_rels/slide1.xml.rels"]
+    assert read_xlsx_part(output, "ppt/media/picture.bin") == original_parts["ppt/media/picture.bin"]
+
+
+@pytest.mark.parametrize("extension", [".docx", ".pptx"])
+def test_office_adapters_reject_path_traversal_and_unsafe_xml(extension):
+    main_part = "word/document.xml" if extension == ".docx" else "ppt/presentation.xml"
+    valid_xml = f"<root xmlns:w='{WORD_NS}'/>".encode()
+    with pytest.raises(DocumentAdapterError, match="unsafe"):
+        parse_document(make_office_package(extension, {main_part: valid_xml}, unsafe_name="../outside.xml")[0], extension)
+
+    entity_parts = {main_part: b"<!DOCTYPE root [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><root>&x;</root>"}
+    entity_source, _ = make_office_package(extension, entity_parts)
+    with pytest.raises(DocumentAdapterError, match="unsafe XML"):
+        parse_document(entity_source, extension)

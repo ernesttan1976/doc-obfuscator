@@ -74,7 +74,15 @@ const previewLines = (preview) => {
     metadata.push(`Existing placeholder-like strings: ${preview.existingPlaceholderLikeTextCount}. Review before processing.`);
   }
   metadata.push(...preview.warnings.map((warning) => `Coverage warning: ${warning}`));
-  return [...metadata, ...(hasText ? content : ['No supported literal text was found.'])];
+  const coverage = preview.coverage ? [
+    `Coverage inventory · ${preview.coverage.examinedXmlPartCount} XML parts examined · ${preview.coverage.textPartCount} text-bearing parts · ${preview.coverage.skippedPartCount} non-XML parts skipped · ${preview.coverage.unsupportedPartCount} unsupported parts detected`,
+    ...preview.coverage.examinedXmlParts.map((part) => `Examined XML part: ${part}`),
+    ...preview.coverage.textParts.map((part) => `Text-bearing part: ${part}`),
+    ...preview.coverage.skippedParts.map((part) => `Skipped package part: ${part}`),
+    ...preview.coverage.unsupportedParts.map((part) => `Unsupported package part: ${part}`),
+    ...(preview.coverage.partNamesTruncated ? ['Coverage inventory is truncated; see adapter limits before processing.'] : []),
+  ] : [];
+  return [...metadata, ...coverage, ...(hasText ? content : ['No supported literal text was found.'])];
 };
 
 function makeToken(used) {

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import PurePosixPath
 from xml.etree import ElementTree as ET
+from xml.sax.saxutils import quoteattr
 
 from defusedxml import ElementTree as SafeET
 from defusedxml.common import DefusedXmlException
@@ -27,6 +28,13 @@ PLACEHOLDER_LIKE_TEXT = re.compile(r"\[\[T_[A-Za-z0-9_-]{3,}\]\]", re.IGNORECASE
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+WORD_TEXT_TAGS = {f"{{{WORD_NS}}}t", f"{{{WORD_NS}}}delText"}
+OFFICE_TEXT_TAGS = {*WORD_TEXT_TAGS, f"{{{DRAWING_NS}}}t"}
+OFFICE_PARAGRAPH_TAGS = {f"{{{WORD_NS}}}p", f"{{{DRAWING_NS}}}p"}
+MAX_COVERAGE_PART_NAMES = 100
+MAX_COVERAGE_PART_NAME_LENGTH = 240
 
 ET.register_namespace("", MAIN_NS)
 ET.register_namespace("r", DOC_REL_NS)
@@ -82,6 +90,11 @@ class ParsedDocument:
     rows: tuple[tuple[str, ...], ...] = ()
     sheets: tuple[WorksheetContent, ...] = ()
     warnings: tuple[str, ...] = ()
+    examined_xml_part_count: int = 0
+    examined_parts: tuple[str, ...] = ()
+    skipped_parts: tuple[str, ...] = ()
+    text_parts: tuple[str, ...] = ()
+    unsupported_parts: tuple[str, ...] = ()
     line_endings: str | None = None
     preexisting_placeholder_count: int = 0
     _csv_fields: tuple[tuple[CsvField, ...], ...] = field(default=(), repr=False)
@@ -111,11 +124,36 @@ class ParsedDocument:
             rows, truncated = _csv_preview(self.rows)
             result["rows"] = rows
             result["truncated"] = truncated
-        else:
+        elif self.format == "XLSX":
             sheets, truncated = _xlsx_preview(self.sheets)
             result["sheets"] = sheets
             result["truncated"] = truncated
+        else:
+            assert self.text is not None
+            result["text"] = self.text[:MAX_PREVIEW_CHARACTERS]
+            result["truncated"] = len(self.text) > MAX_PREVIEW_CHARACTERS
+            result["coverage"] = {
+                "examinedXmlPartCount": self.examined_xml_part_count,
+                "examinedXmlParts": _bounded_part_names(self.examined_parts),
+                "skippedPartCount": len(self.skipped_parts),
+                "skippedParts": _bounded_part_names(self.skipped_parts),
+                "textPartCount": len(self.text_parts),
+                "textParts": _bounded_part_names(self.text_parts),
+                "unsupportedPartCount": len(self.unsupported_parts),
+                "unsupportedParts": _bounded_part_names(self.unsupported_parts),
+                "partNamesTruncated": (
+                    len(self.examined_parts) > MAX_COVERAGE_PART_NAMES
+                    or len(self.skipped_parts) > MAX_COVERAGE_PART_NAMES
+                    or
+                    len(self.text_parts) > MAX_COVERAGE_PART_NAMES
+                    or len(self.unsupported_parts) > MAX_COVERAGE_PART_NAMES
+                ),
+            }
         return result
+
+
+def _bounded_part_names(names: tuple[str, ...]) -> list[str]:
+    return [name[:MAX_COVERAGE_PART_NAME_LENGTH] for name in names[:MAX_COVERAGE_PART_NAMES]]
 
 
 def _csv_preview(rows: tuple[tuple[str, ...], ...]) -> tuple[list[list[dict[str, object]]], bool]:
@@ -201,7 +239,9 @@ def parse_document(data: bytes, extension: str) -> ParsedDocument:
         )
     if normalized_extension == ".xlsx":
         return _parse_xlsx(data)
-    raise DocumentAdapterError("This document format is not supported by the Stage 3 adapters.")
+    if normalized_extension in {".docx", ".pptx"}:
+        return _parse_office_document(data, normalized_extension)
+    raise DocumentAdapterError("This document format is not supported by the local document adapters.")
 
 
 def serialize_with_replacements(parsed: ParsedDocument, replacements: dict[str, str]) -> bytes:
@@ -216,6 +256,8 @@ def serialize_with_replacements(parsed: ParsedDocument, replacements: dict[str, 
         return _serialize_csv(parsed, transform)
     if parsed.format == "XLSX":
         return _serialize_xlsx(parsed.source, transform)
+    if parsed.format in {"DOCX", "PPTX"}:
+        return _serialize_office_document(parsed.source, parsed.format, transform)
     raise DocumentAdapterError("This document format cannot be serialized safely.")
 
 
@@ -524,6 +566,143 @@ def _escape_csv_unquoted(value: str, dialect: csv.Dialect) -> str:
     return value.replace(dialect.escapechar, dialect.escapechar * 2)
 
 
+def _parse_office_document(data: bytes, extension: str) -> ParsedDocument:
+    main_part = "word/document.xml" if extension == ".docx" else "ppt/presentation.xml"
+    label = extension[1:].upper()
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+            names = _validate_archive(archive)
+            if "[Content_Types].xml" not in names or main_part not in names:
+                raise DocumentAdapterError(f"The {label} package is missing its main document part.")
+            paragraph_groups: list[str] = []
+            text_parts: list[str] = []
+            unsupported_parts: set[str] = set()
+            xml_parts = [info.filename for info in archive.infolist() if info.filename.lower().endswith(".xml")]
+            for part_name in xml_parts:
+                root = _parse_xml(archive.read(part_name))
+                groups = _office_paragraph_groups(root)
+                supported_nodes = {id(node) for group in groups for node in group}
+                part_text = ["".join(node.text or "" for node in group) for group in groups]
+                part_text = [text for text in part_text if text]
+                if part_text:
+                    paragraph_groups.extend(part_text)
+                    text_parts.append(part_name)
+                if _office_part_has_unhandled_text(root, supported_nodes, part_name):
+                    unsupported_parts.add(part_name)
+
+            for part_name in names:
+                lower_name = part_name.lower()
+                if lower_name.startswith((
+                    "word/media/",
+                    "ppt/media/",
+                    "word/embeddings/",
+                    "ppt/embeddings/",
+                    "word/activex/",
+                    "ppt/activex/",
+                )) or "vbaproject" in lower_name:
+                    unsupported_parts.add(part_name)
+
+            warnings = [
+                "Only WordprocessingML w:t/w:delText and DrawingML a:t inside paragraphs are processed.",
+                "Images/OCR, macros, embedded binary content, external relationship targets, and document metadata are not processed.",
+            ]
+            warning_parts = sorted(unsupported_parts)
+            warnings.extend(
+                f"Unsupported or unhandled editable text may remain in package part: {part_name[:MAX_COVERAGE_PART_NAME_LENGTH]}"
+                for part_name in warning_parts[:MAX_COVERAGE_PART_NAMES]
+            )
+            if len(warning_parts) > MAX_COVERAGE_PART_NAMES:
+                warnings.append(
+                    f"{len(warning_parts) - MAX_COVERAGE_PART_NAMES} additional unsupported package parts are listed in coverage metadata."
+                )
+            text = "\n".join(paragraph_groups)
+            return ParsedDocument(
+                format=label,
+                encoding="xml-utf-8",
+                source=data,
+                text=text,
+                warnings=tuple(warnings),
+                examined_xml_part_count=len(xml_parts),
+                examined_parts=tuple(xml_parts),
+                skipped_parts=tuple(name for name in names if not name.lower().endswith(".xml")),
+                text_parts=tuple(text_parts),
+                unsupported_parts=tuple(sorted(unsupported_parts)),
+                preexisting_placeholder_count=_count_placeholder_like(paragraph_groups),
+            )
+    except DocumentAdapterError:
+        raise
+    except (OSError, zipfile.BadZipFile, RuntimeError, DefusedXmlException, ValueError) as exc:
+        raise DocumentAdapterError(f"The {label} package is malformed, unsafe, or cannot be read.") from exc
+
+
+def _office_paragraph_groups(root) -> list[list[ET.Element]]:
+    groups: list[list[ET.Element]] = []
+
+    def visit(element, active_group: list[ET.Element] | None = None) -> None:
+        if element.tag in OFFICE_PARAGRAPH_TAGS:
+            active_group = []
+            groups.append(active_group)
+        if element.tag in OFFICE_TEXT_TAGS and active_group is not None:
+            active_group.append(element)
+        for child in element:
+            visit(child, active_group)
+
+    visit(root)
+    return [group for group in groups if group]
+
+
+def _office_part_has_unhandled_text(root, supported_nodes: set[int], part_name: str) -> bool:
+    if part_name.startswith("docProps/"):
+        return True
+    if part_name.endswith(".rels") or part_name == "[Content_Types].xml":
+        return False
+    for element in root.iter():
+        if (
+            element.text
+            and element.text.strip()
+            and (element.tag not in OFFICE_TEXT_TAGS or id(element) not in supported_nodes)
+        ):
+            return True
+        for attribute, value in element.attrib.items():
+            local_name = attribute.rsplit("}", 1)[-1].lower()
+            if local_name in {"descr", "title"} and value.strip():
+                return True
+    return False
+
+
+def _serialize_office_document(
+    source: bytes,
+    document_format: str,
+    transform: _ReplacementFunction,
+) -> bytes:
+    try:
+        with zipfile.ZipFile(io.BytesIO(source), "r") as original:
+            names = _validate_archive(original)
+            main_part = "word/document.xml" if document_format == "DOCX" else "ppt/presentation.xml"
+            if "[Content_Types].xml" not in names or main_part not in names:
+                raise DocumentAdapterError(f"The {document_format} package is missing its main document part.")
+            changed_parts = {}
+            for part_name in names:
+                if not part_name.lower().endswith(".xml") or part_name.lower().startswith("docprops/"):
+                    continue
+                data = original.read(part_name)
+                root = _parse_xml(data)
+                changed = False
+                for group in _office_paragraph_groups(root):
+                    changed = _replace_text_nodes(group, transform) or changed
+                if changed:
+                    changed_parts[part_name] = _serialize_xml(root, data)
+            if not changed_parts:
+                return source
+            return _rewrite_xlsx_archive(original, changed_parts)
+    except DocumentAdapterError:
+        raise
+    except (OSError, zipfile.BadZipFile, RuntimeError, DefusedXmlException, ValueError) as exc:
+        raise DocumentAdapterError(
+            f"The {document_format} package could not be rewritten without changing its package structure."
+        ) from exc
+
+
 def _parse_xlsx(data: bytes) -> ParsedDocument:
     try:
         with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
@@ -632,7 +811,7 @@ def _read_xlsx_cell(cell, shared_strings: list[str]) -> DocumentCell | None:
 def _validate_archive(archive: zipfile.ZipFile) -> set[str]:
     members = archive.infolist()
     if len(members) > MAX_ARCHIVE_MEMBERS:
-        raise DocumentAdapterError("The XLSX package contains too many archive parts.")
+        raise DocumentAdapterError("The Office package contains too many archive parts.")
     names: set[str] = set()
     total_size = 0
     for info in members:
@@ -646,15 +825,15 @@ def _validate_archive(archive: zipfile.ZipFile) -> set[str]:
             or name in names
             or info.flag_bits & 0x1
         ):
-            raise DocumentAdapterError("The XLSX package contains an unsafe or duplicate archive part.")
+            raise DocumentAdapterError("The Office package contains an unsafe or duplicate archive part.")
         names.add(name)
         total_size += info.file_size
         if info.file_size > MAX_ARCHIVE_BYTES or total_size > MAX_ARCHIVE_BYTES:
-            raise DocumentAdapterError("The expanded XLSX package exceeds the safe processing limit.")
+            raise DocumentAdapterError("The expanded Office package exceeds the safe processing limit.")
         if info.file_size and info.file_size / max(info.compress_size, 1) > 1000:
-            raise DocumentAdapterError("The XLSX package contains an unsafe compression ratio.")
+            raise DocumentAdapterError("The Office package contains an unsafe compression ratio.")
     if archive.testzip() is not None:
-        raise DocumentAdapterError("The XLSX package contains a damaged archive part.")
+        raise DocumentAdapterError("The Office package contains a damaged archive part.")
     return names
 
 
@@ -662,17 +841,54 @@ def _parse_xml(data: bytes):
     try:
         return SafeET.fromstring(data)
     except (DefusedXmlException, ET.ParseError, ValueError) as exc:
-        raise DocumentAdapterError("The XLSX package contains malformed or unsafe XML.") from exc
+        raise DocumentAdapterError("The Office package contains malformed or unsafe XML.") from exc
 
 
 def _serialize_xml(root, original_xml: bytes) -> bytes:
     with _XML_NAMESPACE_LOCK:
+        namespace_map = {}
         for _, (prefix, uri) in SafeET.iterparse(io.BytesIO(original_xml), events=("start-ns",)):
+            namespace_map[prefix] = uri
             try:
                 ET.register_namespace(prefix, uri)
             except ValueError:
                 continue
-        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        serialized = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        required_prefixes = _markup_compatibility_prefixes(original_xml)
+        missing_prefixes = [
+            prefix
+            for prefix in required_prefixes
+            if prefix in namespace_map and not re.search(rb"\sxmlns:" + re.escape(prefix.encode()) + rb"=", serialized)
+        ]
+        if missing_prefixes:
+            root_tag = re.search(rb"<(?:[A-Za-z_][\w.-]*:)?[A-Za-z_][\w.-]*", serialized)
+            if root_tag is not None:
+                declarations = b"".join(
+                    b" xmlns:" + prefix.encode() + b"=" + quoteattr(namespace_map[prefix]).encode()
+                    for prefix in missing_prefixes
+                )
+                serialized = serialized[: root_tag.end()] + declarations + serialized[root_tag.end() :]
+        return serialized
+
+
+def _markup_compatibility_prefixes(original_xml: bytes) -> set[str]:
+    markup_compatibility_ns = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+    namespace_attributes = {
+        f"{{{markup_compatibility_ns}}}Ignorable",
+        f"{{{markup_compatibility_ns}}}PreserveElements",
+        f"{{{markup_compatibility_ns}}}PreserveAttributes",
+        f"{{{markup_compatibility_ns}}}ProcessContent",
+    }
+    root = SafeET.fromstring(original_xml)
+    prefixes = set()
+    for element in root.iter():
+        for attribute, value in element.attrib.items():
+            if attribute in namespace_attributes:
+                tokens = value.split()
+                prefixes.update(token.split(":", 1)[0] for token in tokens)
+            elif element.tag == f"{{{markup_compatibility_ns}}}Choice" and attribute.rsplit("}", 1)[-1] == "Requires":
+                prefixes.update(value.split())
+    return prefixes
 
 
 def _resolve_part_target(source_part: str, target: str) -> str:
@@ -809,6 +1025,10 @@ def _rewrite_xlsx_archive(archive: zipfile.ZipFile, changed_parts: dict[str, byt
 
 def _replace_element_text(element, transform: _ReplacementFunction) -> bool:
     text_nodes = element.findall(f".//{{{MAIN_NS}}}t")
+    return _replace_text_nodes(text_nodes, transform)
+
+
+def _replace_text_nodes(text_nodes: list[ET.Element], transform: _ReplacementFunction) -> bool:
     if not text_nodes:
         return False
     original_parts = [node.text or "" for node in text_nodes]

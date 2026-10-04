@@ -19,7 +19,7 @@
 }
 
 .app-shell[data-project-preview='true'] .page-head .eyebrow::after {
-  content: 'STAGE 3 · LOCAL PARSED PREVIEW';
+  content: 'LOCAL PARSED PREVIEW';
 }
 
 .app-shell[data-project-preview='true'] .page-head h1::after {
@@ -69,11 +69,11 @@
 }
 
 .app-shell[data-project-preview='true'][data-preview-error='true'] .page-head h1::after {
-  content: 'Format not supported yet';
+  content: 'Preview unavailable';
 }
 
 .app-shell[data-project-preview='true'][data-preview-error='true'] .page-head .subhead::after {
-  content: 'This original remains saved and unchanged. Its document format does not have a Stage 3 preview adapter.';
+  content: 'This original remains saved and unchanged. The local adapter could not parse this document.';
 }
 
 .app-shell[data-project-preview='true'][data-preview-error='true'] .review-title > span::after {

@@ -109,14 +109,16 @@ Development keeps the existing high-fidelity React design. Release serving must 
 
 **Gate:** golden fixtures prove encoding, line-ending, CSV dialect, and workbook structure invariants (except intended cell/text replacement); formulas/styles/relationships and originals remain unchanged; malformed/ambiguous input and unsupported workbook parts are reported before later export.
 
-### Stage 4 — DOCX/PPTX editable-text adapters and coverage report
+### Stage 4 — DOCX/PPTX editable-text adapters and coverage report (complete)
 
 - Implement package-preserving Office text traversal/replacement and restoration, including supported body/slide text, tables, text boxes, notes and other editable text-bearing package parts.
 - Maintain formatting and surrounding structure where possible; test terms split across runs, moved/repeated placeholders, and agent-edited structure.
 - Inventory every examined/skipped part. Surface unsupported parts with a visible warning and explicit export acknowledgement. Unknown tokens remain untouched and are reported.
 - Do not claim support for OCR/image text, macros, arbitrary embedded objects, or metadata removal unless a dedicated tested adapter is later accepted.
 
-**Gate:** synthetic DOCX/PPTX fixtures round-trip with formatting/structure assertions; supported coverage report is stable; warnings and acknowledgement are test-covered.
+**Gate:** synthetic DOCX/PPTX fixtures round-trip with formatting/structure assertions; supported coverage report is stable; warnings are test-covered. Export-time warning acknowledgement is gated with Stage 7.
+
+**Implemented scope:** DOCX/PPTX archives are validated and scanned locally. The adapters traverse WordprocessingML `w:t`/`w:delText` and DrawingML `a:t` paragraph text across package XML parts, including body/slide text, tables, headers, comments, and notes. Exact replacements span split runs, retain the leading run's formatting, apply to repeated/moved tokens, and leave untouched package parts byte-identical. Bounded coverage reports list examined XML parts, skipped non-XML parts, detected text-bearing parts, and unsupported/unhandled parts; metadata, images/OCR, macros, embedded binary content, external relationship targets, and non-paragraph/unknown XML text are not processed. The adapters are available for preview and round-trip verification; export acknowledgement and product restoration workflows remain Stages 7–8.
 
 ### Stage 5 — Candidate extraction, graph, and local similarity
 
@@ -194,6 +196,7 @@ Development keeps the existing high-fidelity React design. Release serving must 
 - [x] Stage 1: baseline local React + FastAPI runtime and test/security scaffolding.
 - [x] Stage 2: native project/document pickers, create/open/import UI and API, SQLite document/version records, read-only source copies, OS-protected data key, AES-GCM-encrypted graph/map sidecar, and missing-key errors.
 - [x] Stage 3: strict UTF-8/UTF-16 TXT/MD parsing; structure-preserving CSV scanning/replacement; safe XLSX literal-cell preview/replacement with formula/package preservation and coverage warnings; protected bounded preview API/UI; placeholder-like text count.
-- [ ] Stages 4–10: not started.
+- [x] Stage 4: safe DOCX/PPTX package parsing and exact paragraph-text replacement across split runs; bounded local text previews; detected coverage inventory for unsupported parts; synthetic format-preservation and round-trip tests.
+- [ ] Stages 5–10: not started.
 
-**Stage 3 boundary:** DOCX/PPTX parsing begins in Stage 4. Candidate extraction/graph suggestions begin in Stage 5; review workflow is Stage 6; obfuscation/export is Stage 7; returned Office restoration is Stage 8. Stage 3's XLSX adapter supports exact mapped text replacement for adapter round-trip verification, but the product does not yet expose an export or restoration workflow. Idle relock and portable encrypted backup remain release-hardening work (Stage 9); the chosen unlock policy is OS reauthentication, not a UI-only lock.
+**Current boundary:** Candidate extraction/graph suggestions begin in Stage 5; review workflow is Stage 6; obfuscation/export is Stage 7; returned Office restoration is Stage 8. DOCX/PPTX and XLSX adapters support exact mapped text replacement for adapter round-trip verification, but the product does not yet expose an export or restoration workflow. Unsupported-part warnings are visible in preview; explicit acknowledgement is gated with export in Stage 7. Idle relock and portable encrypted backup remain release-hardening work (Stage 9); the chosen unlock policy is OS reauthentication, not a UI-only lock.

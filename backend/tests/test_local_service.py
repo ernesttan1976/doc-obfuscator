@@ -1,6 +1,8 @@
+import io
 import os
 import secrets
 import sqlite3
+import zipfile
 from types import SimpleNamespace
 
 import httpx
@@ -36,6 +38,21 @@ def local_client(tmp_path, key_store=None):
     app = create_app(tmp_path, key_store=key_store)
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 54123))
     return app, httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8765")
+
+
+def minimal_docx():
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'/>",
+        )
+        archive.writestr(
+            "word/document.xml",
+            "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
+            "<w:body><w:p><w:r><w:t>Office preview content</w:t></w:r></w:p></w:body></w:document>",
+        )
+    return package.getvalue()
 
 
 @pytest.fixture
@@ -308,7 +325,7 @@ async def test_document_preview_is_token_protected_and_returns_parsed_content(tm
     office_source = tmp_path / "brief.docx"
     root.mkdir()
     source.write_bytes(b"Alex Tan\r\nProject Cedar\r\n")
-    office_source.write_bytes(b"Stage 4 adapter pending")
+    office_source.write_bytes(minimal_docx())
     app, client_context = local_client(tmp_path, MemoryKeyStore())
     async with client_context as client:
         headers = {"X-Local-App-Token": app.state.local_token}
@@ -331,10 +348,10 @@ async def test_document_preview_is_token_protected_and_returns_parsed_content(tm
         payload = {"directory": str(root), "document_id": document_id}
         denied = await client.post("/api/projects/document-preview", json=payload)
         preview = await client.post("/api/projects/document-preview", json=payload, headers=headers)
-        unsupported_id = imported_office.json()["documents"][0]["id"]
-        unsupported = await client.post(
+        office_id = imported_office.json()["documents"][0]["id"]
+        office_preview = await client.post(
             "/api/projects/document-preview",
-            json={"directory": str(root), "document_id": unsupported_id},
+            json={"directory": str(root), "document_id": office_id},
             headers=headers,
         )
 
@@ -342,8 +359,9 @@ async def test_document_preview_is_token_protected_and_returns_parsed_content(tm
     assert preview.status_code == 200
     assert preview.json()["format"] == "MD"
     assert preview.json()["text"] == "Alex Tan\r\nProject Cedar\r\n"
-    assert unsupported.status_code == 422
-    assert unsupported.json()["detail"] == "This document format is not supported by the Stage 3 adapters."
+    assert office_preview.status_code == 200
+    assert office_preview.json()["format"] == "DOCX"
+    assert office_preview.json()["text"] == "Office preview content"
 
 
 @pytest.mark.anyio
