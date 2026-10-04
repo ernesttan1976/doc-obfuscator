@@ -15,3 +15,23 @@ export function findPageTermMatches(text, candidates) {
   }
   return matches;
 }
+
+export function mapClientRectToLayer(rect, layerBounds, layerSize) {
+  const scaleX = layerBounds.width > 0 ? layerSize.width / layerBounds.width : 1;
+  const scaleY = layerBounds.height > 0 ? layerSize.height / layerBounds.height : 1;
+  return {
+    left: (rect.left - layerBounds.left) * scaleX,
+    top: (rect.top - layerBounds.top) * scaleY,
+    width: rect.width * scaleX,
+    height: rect.height * scaleY,
+  };
+}
+
+export function mapClientPointToLayer(x, y, layerBounds, layerSize) {
+  const scaleX = layerBounds.width > 0 ? layerSize.width / layerBounds.width : 1;
+  const scaleY = layerBounds.height > 0 ? layerSize.height / layerBounds.height : 1;
+  return {
+    x: (x - layerBounds.left) * scaleX,
+    y: (y - layerBounds.top) * scaleY,
+  };
+}

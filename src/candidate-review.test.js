@@ -6,7 +6,7 @@ import {
   getCandidatesNotSelectedAtLevel,
   getVisibleCandidates,
 } from './candidate-review.js';
-import { findPageTermMatches } from './page-highlights.js';
+import { findPageTermMatches, mapClientPointToLayer, mapClientRectToLayer } from './page-highlights.js';
 
 const candidates = [
   { id: 'email', level: 2, decision: 'suggested' },
@@ -63,4 +63,15 @@ test('page term matching is case-insensitive and prefers the longest overlapping
       { text: 'Project Cedar', id: 'cedar' },
     ],
   );
+});
+
+test('page highlight geometry maps transformed client coordinates into overlay coordinates', () => {
+  const bounds = { left: 100, top: 50, width: 200, height: 100 };
+  const size = { width: 400, height: 200 };
+
+  assert.deepEqual(
+    mapClientRectToLayer({ left: 120, top: 60, width: 10, height: 5 }, bounds, size),
+    { left: 40, top: 20, width: 20, height: 10 },
+  );
+  assert.deepEqual(mapClientPointToLayer(125, 65, bounds, size), { x: 50, y: 30 });
 });
