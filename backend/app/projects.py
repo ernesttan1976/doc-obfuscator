@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import tempfile
 import uuid
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .candidate_engine import (
+    CandidateBlock,
     CandidateError,
     analyze_candidates,
     blocks_for_document,
@@ -21,6 +23,7 @@ from .candidate_engine import (
 from .document_adapters import parse_document
 from .key_store import KeyStoreUnavailable, ProjectKeyStore
 from .local_crypto import atomic_write_private, decrypt_state, encrypt_state
+from .model_manager import ModelManagerError
 
 MANIFEST_NAME = "project.json"
 DATABASE_NAME = "project.sqlite3"
@@ -67,8 +70,13 @@ class DocumentSummary:
 
 
 class ProjectService:
-    def __init__(self, key_store: ProjectKeyStore) -> None:
+    def __init__(
+        self,
+        key_store: ProjectKeyStore,
+        entity_extractor: Callable[[tuple[CandidateBlock, ...]], tuple[list[dict[str, object]], bool]] | None = None,
+    ) -> None:
         self.key_store = key_store
+        self.entity_extractor = entity_extractor
 
     def create(self, directory: str | Path, name: str) -> ProjectSummary:
         root = self._validate_directory(directory)
@@ -171,12 +179,20 @@ class ProjectService:
         retained_manual_terms = [
             str(node["term"]) for node in existing_nodes if node.get("source") == "manual"
         ]
+        blocks = blocks_for_document(parsed)
+        ner_warning = None
+        try:
+            ner_entities, ner_truncated = self.entity_extractor(blocks) if self.entity_extractor else ([], False)
+        except ModelManagerError:
+            ner_entities, ner_truncated = [], False
+            ner_warning = "The local NER model could not run; deterministic candidate discovery continued."
         candidates, proposals = analyze_candidates(
-            blocks_for_document(parsed),
+            blocks,
             document_id,
             version_id,
             existing_nodes,
             [*retained_manual_terms, *(manual_terms or [])],
+            ner_entities=ner_entities,
         )
         old_ids = {node["id"] for node in existing_nodes}
         graph["nodes"] = [node for node in nodes if node.get("id") not in old_ids] + candidates
@@ -197,6 +213,9 @@ class ProjectService:
             ],
             "candidateLimitReached": len(candidates) >= 1_000,
             "proposalLimitReached": len(proposals) >= 1_000,
+            "nerTruncated": ner_truncated,
+            "nerCandidateCount": sum(node.get("source") == "ner" for node in candidates),
+            "nerWarning": ner_warning,
         }
 
     def set_candidate_decision(

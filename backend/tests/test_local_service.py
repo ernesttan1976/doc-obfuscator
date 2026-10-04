@@ -35,7 +35,7 @@ class MemoryKeyStore:
 
 
 def local_client(tmp_path, key_store=None):
-    app = create_app(tmp_path, key_store=key_store)
+    app = create_app(tmp_path, key_store=key_store, models_directory=tmp_path / "models")
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 54123))
     return app, httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8765")
 
@@ -87,6 +87,26 @@ async def test_bootstrap_token_is_uncached_and_required_for_private_api(tmp_path
         "status": "ready",
         "storage": "not-configured",
     }
+
+
+@pytest.mark.anyio
+async def test_ner_model_status_is_private_and_download_requires_explicit_confirmation(tmp_path):
+    app, client_context = local_client(tmp_path)
+    async with client_context as client:
+        denied = await client.get("/api/models/ner/status")
+        headers = {"X-Local-App-Token": app.state.local_token}
+        status_response = await client.get("/api/models/ner/status", headers=headers)
+        unconfirmed = await client.post("/api/models/ner/download", json={}, headers=headers)
+
+    assert denied.status_code == 401
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "idle"
+    assert status_response.json()["modelId"] == "knowledgator/gliner-multitask-large-v0.5"
+    assert status_response.json()["revision"] == "7a95e168036db9ec6f914c0cc6b218edbd87f310"
+    assert status_response.json()["license"] == "Apache-2.0"
+    assert status_response.json()["installed"] is False
+    assert unconfirmed.status_code == 400
+    assert not (tmp_path / "models").exists()
 
 
 @pytest.mark.anyio
@@ -459,6 +479,9 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
     assert denied.status_code == 401
     assert analysis.status_code == 200
     assert analysis.json()["versionId"] == imported.json()["documents"][0]["versionId"]
+    assert analysis.json()["nerCandidateCount"] == 0
+    assert analysis.json()["nerTruncated"] is False
+    assert analysis.json()["nerWarning"] is None
     assert analysis.json()["groups"] == []
     assert analysis.json()["proposals"]
     assert all(proposal["confirmed"] is False for proposal in analysis.json()["proposals"])

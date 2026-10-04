@@ -1,62 +1,82 @@
-.app-shell[data-project-preview='true'] .page-head .eyebrow,
-.app-shell[data-project-preview='true'] .page-head h1,
-.app-shell[data-project-preview='true'] .page-head .subhead,
-.app-shell[data-project-preview='true'] .review-title > span {
-  font-size: 0;
-}
-
-.app-shell[data-project-preview='true'] .page-head .eyebrow::after,
-.app-shell[data-project-preview='true'] .page-head h1::after,
-.app-shell[data-project-preview='true'] .page-head .subhead::after,
-.app-shell[data-project-preview='true'] .review-title > span::after {
-  font-size: 13px;
-}
-
-.app-shell[data-project-preview='true'] .page-head .eyebrow::after {
-  content: 'LOCAL PARSED PREVIEW';
-}
-
-.app-shell[data-project-preview='true'] .page-head h1::after {
-  content: 'Document review';
-  font-size: 30px;
-}
-
-.app-shell[data-project-preview='true'] .page-head .subhead::after {
-  content: 'Candidates are local suggestions. Review every decision; the saved original remains unchanged.';
-  color: var(--muted);
-}
-
 .app-shell[data-project-preview='true'] .page-head > .primary-btn,
 .app-shell[data-project-preview='true'] .review-toolbar .view-switch,
 .app-shell[data-project-preview='true'] .doc-kicker,
-.app-shell[data-project-preview='true'] .legend,
-.app-shell[data-project-preview='true'] .right-stack > .panel:last-child {
+.app-shell[data-project-preview='true'] .legend {
   display: none;
 }
 
-.app-shell[data-project-preview='true'] .review-title > span::after {
-  content: 'Original · local candidate review · no document changes';
-}
-
-.app-shell[data-project-preview='true'][data-preview-error='true'] .page-head .eyebrow::after {
-  content: 'SAVED ORIGINAL · PREVIEW UNAVAILABLE';
-}
-
-.app-shell[data-project-preview='true'][data-preview-error='true'] .page-head h1::after {
-  content: 'Preview unavailable';
-}
-
-.app-shell[data-project-preview='true'][data-preview-error='true'] .page-head .subhead::after {
-  content: 'This original remains saved and unchanged. The local adapter could not parse this document.';
-}
-
-.app-shell[data-project-preview='true'][data-preview-error='true'] .review-title > span::after {
-  content: 'Saved original · not parsed or modified';
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .manual-candidate-form {
   padding: 12px;
   border-bottom: 1px solid var(--border-soft);
+}
+
+.ner-model-panel {
+  display: grid;
+  gap: 8px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.ner-model-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 5px 9px;
+}
+
+.ner-model-heading strong {
+  color: var(--fg);
+  font-size: 11px;
+}
+
+.ner-download-button {
+  width: fit-content;
+  flex: 0 1 auto;
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.ner-download-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ner-download-progress progress {
+  min-width: 0;
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.ner-download-progress .small-btn {
+  flex: 0 0 auto;
+  padding: 0 8px;
+}
+
+.ner-model-note {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.ner-model-note code {
+  color: var(--fg);
+  font-family: var(--font-mono);
 }
 
 .manual-candidate-form label,

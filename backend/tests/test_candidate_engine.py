@@ -69,6 +69,25 @@ def test_manual_phrase_is_included_and_pinned_and_decisions_survive_analysis():
     assert preserved["pinned"] is True
 
 
+def test_ner_entities_become_suggestions_and_enrich_matching_pattern_candidates():
+    blocks = [CandidateBlock("text", "Alex Tan works at Example Corp.")]
+    entities = [
+        {"text": "Alex Tan", "location": "text", "start": 0, "end": 8, "label": "person", "score": 0.91},
+        {"text": "Example Corp", "location": "text", "start": 18, "end": 30, "label": "organization", "score": 0.88},
+        {"text": "Wrong text", "location": "text", "start": 0, "end": 10, "label": "person", "score": 0.99},
+    ]
+
+    candidates, _ = analyze_candidates(blocks, "doc-1", "version-1", ner_entities=entities)
+    by_term = {candidate["term"]: candidate for candidate in candidates}
+
+    assert by_term["Alex Tan"]["source"] == "ner"
+    assert by_term["Alex Tan"]["category"] == "NER_ENTITY"
+    assert by_term["Alex Tan"]["nerLabels"] == ["person"]
+    assert by_term["Alex Tan"]["nerScore"] == 0.91
+    assert by_term["Example Corp"]["source"] == "ner"
+    assert "Wrong text" not in by_term
+
+
 def test_manual_phrase_must_exist_in_supported_text():
     with pytest.raises(CandidateError, match="not present"):
         analyze_candidates(

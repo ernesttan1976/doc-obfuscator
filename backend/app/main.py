@@ -23,6 +23,7 @@ from .folder_picker import (
     pick_project_directory,
 )
 from .key_store import KeyStoreUnavailable, OSKeyringProjectKeyStore, ProjectKeyStore
+from .model_manager import LocalModelManager, ModelManagerError
 from .projects import ProjectError, ProjectService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -113,9 +114,14 @@ class CandidateGroupRequest(BaseModel):
     group_ids: list[str] = Field(default_factory=list, max_length=1000)
 
 
+class ModelDownloadRequest(BaseModel):
+    confirmed: bool = False
+
+
 def create_app(
     frontend_dist: Path = FRONTEND_DIST,
     key_store: ProjectKeyStore | None = None,
+    models_directory: Path | None = None,
 ) -> FastAPI:
     """Create the local API and, after a frontend build, serve its static UI."""
     app = FastAPI(
@@ -127,7 +133,10 @@ def create_app(
     local_token = secrets.token_urlsafe(32)
     dev_origins = _configured_dev_origins()
     app.state.local_token = local_token
-    app.state.project_service = ProjectService(key_store) if key_store is not None else None
+    app.state.model_manager = LocalModelManager(models_directory)
+    app.state.project_service = (
+        ProjectService(key_store, app.state.model_manager.extract_entities) if key_store is not None else None
+    )
 
     app.add_middleware(
         CORSMiddleware,
@@ -168,9 +177,29 @@ def create_app(
     async def session() -> dict[str, str]:
         return {"status": "ready", "storage": "not-configured"}
 
+    @app.get("/api/models/ner/status")
+    def ner_model_status() -> dict[str, object]:
+        return app.state.model_manager.status()
+
+    @app.post("/api/models/ner/download")
+    def download_ner_model(payload: ModelDownloadRequest) -> dict[str, object]:
+        try:
+            return app.state.model_manager.start_download(payload.confirmed)
+        except ModelManagerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/models/ner/download")
+    def cancel_ner_model_download() -> dict[str, object]:
+        try:
+            return app.state.model_manager.cancel_download()
+        except ModelManagerError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     def project_service() -> ProjectService:
         if app.state.project_service is None:
-            app.state.project_service = ProjectService(OSKeyringProjectKeyStore())
+            app.state.project_service = ProjectService(
+                OSKeyringProjectKeyStore(), app.state.model_manager.extract_entities
+            )
         return app.state.project_service
 
     @app.post("/api/projects", status_code=status.HTTP_201_CREATED)

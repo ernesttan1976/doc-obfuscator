@@ -12,3 +12,5 @@ Requires-Dist: uvicorn==0.54.0
 Provides-Extra: dev
 Requires-Dist: httpx==0.28.1; extra == "dev"
 Requires-Dist: pytest==8.4.2; extra == "dev"
+Provides-Extra: models
+Requires-Dist: gliner==0.2.29; extra == "models"

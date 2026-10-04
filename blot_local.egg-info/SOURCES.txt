@@ -9,9 +9,12 @@ backend/app/folder_picker.py
 backend/app/key_store.py
 backend/app/local_crypto.py
 backend/app/main.py
+backend/app/model_manager.py
 backend/app/projects.py
+backend/tests/test_candidate_engine.py
 backend/tests/test_document_adapters.py
 backend/tests/test_local_service.py
+backend/tests/test_model_manager.py
 blot_local.egg-info/PKG-INFO
 blot_local.egg-info/SOURCES.txt
 blot_local.egg-info/dependency_links.txt

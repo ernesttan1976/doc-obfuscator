@@ -8,6 +8,7 @@
     "api:dev": "uv run python -m backend.app",
     "start:local": "uv run python -m backend.app",
     "build": "vite build",
+    "test": "node --test src/candidate-review.test.js",
     "preview": "vite preview --open /obfuscation-workspace.html"
   },
   "dependencies": {

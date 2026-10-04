@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { getCandidateDecisionCounts, getSuggestedBelowLevelCount, getVisibleCandidates } from './candidate-review.js';
 import './stage3-preview.css';
 
 const sampleText = [
@@ -102,6 +103,7 @@ export default function App() {
   const [projectDirectory, setProjectDirectory] = useState('');
   const [localToken, setLocalToken] = useState('');
   const [serviceAvailable, setServiceAvailable] = useState(false);
+  const [nerModelStatus, setNerModelStatus] = useState(null);
   const [currentProject, setCurrentProject] = useState(null);
   const [projectBusy, setProjectBusy] = useState(false);
   const [manualPhrase, setManualPhrase] = useState('');
@@ -125,9 +127,7 @@ export default function App() {
   });
   const matchCount = changeRows.reduce((sum, row) => sum + (row.decision === 'excluded' ? 0 : row.occurrences), 0);
   const candidates = activeFile.candidates || [];
-  const visibleCandidates = candidates.filter((candidate) => (
-    candidate.level <= level || candidate.decision !== 'suggested'
-  ));
+  const visibleCandidates = getVisibleCandidates(candidates, level);
   const candidatesById = Object.fromEntries(candidates.map((candidate) => [candidate.id, candidate]));
   const candidateGroups = activeFile.candidateGroups || [];
   const proposals = (activeFile.proposals || []).filter((proposal) => (
@@ -137,11 +137,8 @@ export default function App() {
       group.candidateIds.includes(proposal.sourceId) && group.candidateIds.includes(proposal.targetId)
     ))
   ));
-  const candidateDecisionCounts = candidates.reduce((counts, candidate) => {
-    counts[candidate.decision] = (counts[candidate.decision] || 0) + 1;
-    return counts;
-  }, { suggested: 0, included: 0, excluded: 0 });
-  const belowLevelCount = candidates.filter((candidate) => candidate.level > level && candidate.decision === 'suggested').length;
+  const candidateDecisionCounts = getCandidateDecisionCounts(candidates);
+  const belowLevelCount = getSuggestedBelowLevelCount(candidates, level);
   const previewCoverage = activeFile.previewCoverage;
   const previewWarnings = activeFile.previewWarnings || [];
   const unsupportedPartCount = previewCoverage?.unsupportedPartCount || 0;
@@ -163,6 +160,32 @@ export default function App() {
       });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!localToken) return undefined;
+    let cancelled = false;
+    let timer;
+    const refreshModelStatus = async () => {
+      try {
+        const response = await fetch('/api/models/ner/status', {
+          headers: { 'X-Local-App-Token': localToken },
+          cache: 'no-store',
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Could not check local NER model status');
+        if (cancelled) return;
+        setNerModelStatus(data);
+        if (data.status === 'downloading') timer = window.setTimeout(refreshModelStatus, 1000);
+      } catch (error) {
+        if (!cancelled) setNerModelStatus({ status: 'unavailable', error: error.message });
+      }
+    };
+    void refreshModelStatus();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [localToken, nerModelStatus?.status]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -248,6 +271,9 @@ export default function App() {
             proposals: data.proposals,
             candidateGroups: data.groups,
             candidateLimitReached: data.candidateLimitReached || data.proposalLimitReached,
+            nerTruncated: data.nerTruncated || false,
+            nerCandidateCount: data.nerCandidateCount || 0,
+            nerWarning: data.nerWarning || '',
             candidateLoaded: true,
             candidateLoading: false,
             candidateError: '',
@@ -260,6 +286,36 @@ export default function App() {
         file.id === documentId ? { ...file, candidateLoading: false, candidateLoaded: false, candidateError: error.message } : file
       )));
       return false;
+    }
+  };
+
+  const downloadNerModel = async () => {
+    if (!localToken || !window.confirm('Download the Apache-2.0 NER model and tokenizer (~0.9 GB) now? This starts a network download. Local inference may use several GB of memory; document analysis remains on this computer.')) return;
+    try {
+      const response = await fetch('/api/models/ner/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not start the model download');
+      setNerModelStatus(data);
+    } catch (error) {
+      setNerModelStatus((current) => ({ ...(current || {}), status: 'failed', error: error.message }));
+    }
+  };
+
+  const cancelNerModelDownload = async () => {
+    try {
+      const response = await fetch('/api/models/ner/download', {
+        method: 'DELETE',
+        headers: { 'X-Local-App-Token': localToken },
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not cancel the model download');
+      setNerModelStatus(data);
+    } catch (error) {
+      setNerModelStatus((current) => ({ ...(current || {}), error: error.message }));
     }
   };
 
@@ -327,6 +383,18 @@ export default function App() {
         ? { ...file, content: previewSections[nextIndex].content }
         : file
     )));
+  };
+
+  const handlePreviewNavigationKeyDown = (event) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    let nextIndex = null;
+    if (event.key === 'ArrowLeft') nextIndex = sectionIndex - 1;
+    if (event.key === 'ArrowRight') nextIndex = sectionIndex + 1;
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = previewSections.length - 1;
+    if (nextIndex === null || nextIndex < 0 || nextIndex >= previewSections.length || nextIndex === sectionIndex) return;
+    event.preventDefault();
+    selectPreviewSection(nextIndex);
   };
 
   const setProjectCandidateDecision = async (candidate, decision) => {
@@ -650,19 +718,28 @@ export default function App() {
       <main className="main">
         <header className="topbar"><div className="crumbs"><span>{currentProject?.name || 'Cedar briefing · demo'}</span><span>/</span><strong>{activeFile.name}</strong></div><div className="top-actions"><button className="text-btn" onClick={() => setToast('Encrypted backup is planned for release hardening')}>Encrypted backup</button><button className="icon-btn" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀' : '☾'}</button><button className="icon-btn" aria-label="Open local settings" onClick={() => setToast('Local settings are available in the service configuration')}>•••</button><button className="primary-btn" disabled={currentProject && projectBusy} onClick={() => currentProject ? importProjectDocuments() : setModalOpen(true)}>{projectBusy ? 'Working…' : 'Import file'}</button></div></header>
         <div className="workspace">
-          <div className="page-head"><div><p className="eyebrow">Document review · version 03</p><h1>Prepare a safe copy</h1><p className="subhead">Review suggested terms before this editable-text document leaves your computer. Similarity is a prompt, never a decision.</p></div><button className="primary-btn" onClick={exportCopy}>Export obfuscated copy</button></div>
+          <div className="page-head"><div><p className="eyebrow">{activeFile.isProjectDocument ? (activeFile.previewError ? 'Saved original · preview unavailable' : 'Local parsed preview') : 'Document review · version 03'}</p><h1>{activeFile.isProjectDocument ? (activeFile.previewError ? 'Preview unavailable' : 'Document review') : 'Prepare a safe copy'}</h1><p className="subhead">{activeFile.isProjectDocument ? (activeFile.previewError ? 'This original remains saved and unchanged. The local adapter could not parse this document.' : 'Candidates are local suggestions. Review each decision; the saved original remains unchanged.') : 'Review suggested terms before this editable-text document leaves your computer. Similarity is a prompt, never a decision.'}</p></div><button className="primary-btn" onClick={exportCopy}>Export obfuscated copy</button></div>
           <section className="layout">
             <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${files.filter((file) => file.isProjectDocument).length} saved` : `${files.length} items`}</span></div><div className="file-list">{files.map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span><span className="file-name">{file.name}</span><span className="file-status">{file.isProjectDocument ? file.status : currentProject ? 'Synthetic sample · not saved' : file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : file.status.includes('Restore') ? '↗' : ''}</span></button>)}</div></aside>
             <section className="panel review-panel">
-              <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? 'Original source · not parsed or modified' : `Editable text view · ${activeFile.content.length} ${activeFile.type === 'PPTX' ? 'slides' : 'pages'} · local preview`}</span></div><div className="view-switch" role="tablist" aria-label="Document view"><button className={view === 'preview' ? 'active' : ''} role="tab" aria-selected={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button className={view === 'changes' ? 'active' : ''} role="tab" aria-selected={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div>
+              <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? (activeFile.previewError ? 'Saved original · not parsed or modified' : 'Local preview · saved original unchanged') : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div>
               <div className="slider-area"><div className="slider-labels"><label htmlFor="sensitivity">Candidate breadth</label><span className="slider-value">Level {level} / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value={level} aria-valuetext={`Level ${level} of 10 candidate breadth`} onChange={(event) => setLevel(Number(event.target.value))} /><div className="range-notes"><span>Narrow · fewer candidate types</span><span>All detected candidates</span></div></div>
               {view === 'preview' ? <div className="preview"><div className="preview-note"><span className="status-dot" /><span>{activeFile.isProjectDocument ? (activeFile.candidateLoading ? 'Scanning supported editable text locally…' : `${visibleCandidates.length} candidates shown at level ${level}. Review decisions below; only supported editable text is scanned.`) : `${visibleGroups.length} suggested groups are visible at this level. Click a highlighted term to decide.`}</span></div><article className="doc-page"><div className="doc-kicker">BOARD UPDATE · 04 OCTOBER 2026</div><h2>{activeFile.heading}</h2>{activeFile.content.map((paragraph, index) => <p key={`${activeFile.name}-${index}`}>{renderParagraph(paragraph)}</p>)}<div className="legend"><span className="legend-item"><span className="legend-swatch" />Suggested</span><span className="legend-item"><span className="legend-swatch manual" />Manual decision</span><span className="legend-item">Click a term to inspect its group</span></div></article><div className="preview-foot"><span><strong>{activeFile.isProjectDocument ? visibleCandidates.reduce((sum, candidate) => sum + (candidate.decision === 'excluded' ? 0 : candidate.occurrenceCount), 0) : matchCount}</strong> included or suggested occurrences at level <strong>{level}</strong></span><span>Original stays unchanged</span></div>{undo?.file === activeName && <button className="small-btn undo-button" onClick={undoDecision}>Undo last decision</button>}</div> : <div className="preview changes-pane"><div className="preview-note"><span className="status-dot" /><span>Export diff for version 03</span></div><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr style={{ color: 'var(--muted)', font: '11px var(--font-mono)', textAlign: 'left' }}><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>OCCURRENCE</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>REPLACEMENT</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>DECISION</th></tr></thead><tbody>{changeRows.map(({ group, occurrences, decision }) => <tr key={group.id}><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{group.term} · {occurrences} {occurrences === 1 ? 'match' : 'matches'}</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>[[{group.token}]]</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{decision === 'excluded' ? 'Excluded' : decision === 'included' ? 'Included' : 'Suggested'}</td></tr>)}</tbody></table></div>}
             </section>
             <aside className="right-stack">
               {activeFile.isProjectDocument ? <section className="panel candidate-panel">
                 <div className="panel-head"><span className="panel-title">Candidate review</span><span className="panel-meta">{visibleCandidates.length} shown</span></div>
+                <div className="ner-model-panel" aria-label="High-recall local NER model">
+                  <div className="ner-model-heading"><strong>High-recall local NER</strong><span role="status" aria-live="polite">{nerModelStatus?.installed ? (nerModelStatus.runtimeAvailable ? 'Installed · offline ready' : 'Model installed · runtime setup needed') : nerModelStatus?.status === 'downloading' ? 'Downloading model…' : 'Not downloaded · patterns remain active'}</span></div>
+                  {nerModelStatus?.status === 'downloading' && <div className="ner-download-progress"><progress max={nerModelStatus.totalBytes || nerModelStatus.sizeBytes || 1} value={nerModelStatus.downloadedBytes || 0} aria-label="NER model download progress" /><span>{Math.floor(100 * (nerModelStatus.downloadedBytes || 0) / (nerModelStatus.totalBytes || nerModelStatus.sizeBytes || 1))}%</span><button className="small-btn" type="button" onClick={cancelNerModelDownload}>Cancel</button></div>}
+                  {!nerModelStatus?.installed && nerModelStatus?.status !== 'downloading' && <button className="small-btn ner-download-button" type="button" onClick={downloadNerModel} disabled={!localToken}>Download model and tokenizer · ~0.9 GB</button>}
+                  {nerModelStatus?.installed && !nerModelStatus.runtimeAvailable && <p className="ner-model-note">Install with <code>uv sync --extra models</code>, then reload the app to enable offline inference.</p>}
+                  {nerModelStatus?.error && <p className="candidate-error" role="alert">{nerModelStatus.error}</p>}
+                  <small className="ner-model-note">Apache-2.0 · pinned files · explicit download · may use several GB RAM · suggestions only</small>
+                </div>
                 <label className="dense-toggle"><input type="checkbox" checked={denseText} onChange={(event) => setDenseText(event.target.checked)} /> Dense text view</label>
-                {previewSections.length > 1 && <div className="preview-navigation" role="group" aria-label="Preview sections">
+                {previewSections.length > 1 && <div className="preview-navigation" role="group" aria-label="Preview section navigation" aria-describedby="preview-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}>
+                  <span className="sr-only" id="preview-navigation-help">Use Left or Right Arrow to move between sections, or Home and End to jump to the first and last sections.</span>
                   <button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex - 1)} disabled={sectionIndex <= 0} aria-label="Previous preview section">Previous</button>
                   <span aria-live="polite"><strong>Section {sectionIndex + 1} of {previewSections.length}</strong><small>{activeSection?.label}</small></span>
                   <button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex + 1)} disabled={sectionIndex >= previewSections.length - 1} aria-label="Next preview section">Next</button>
@@ -682,9 +759,11 @@ export default function App() {
                   {activeFile.candidateLoading && <p role="status">Scanning supported text locally…</p>}
                   {activeFile.candidateError && <p className="candidate-error" role="alert">{activeFile.candidateError} <button className="small-btn" onClick={() => loadProjectDocumentCandidates(activeFile.id)}>Retry</button></p>}
                   {activeFile.candidateLimitReached && <p className="candidate-limit">Candidate or proposal list reached its display limit.</p>}
+                  {activeFile.nerTruncated && <p className="candidate-limit" role="status">The local NER scan was capped at 250,000 supported-text characters; some text was not analyzed by the model.</p>}
+                  {activeFile.nerWarning && <p className="candidate-error" role="status">{activeFile.nerWarning}</p>}
                   {visibleCandidates.map((candidate) => <div className="graph-card candidate-card" key={candidate.id}>
                     <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">Level {candidate.level}</span></div>
-                    <p className="graph-reason">{candidate.category.replaceAll('_', ' ').toLowerCase()} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'} · {candidate.source}</p>
+                    <p className="graph-reason">{candidate.nerLabels?.length ? `NER · ${candidate.nerLabels.join(', ')} · model score ${Math.round((candidate.nerScore || 0) * 100)}%${candidate.source === 'manual' ? ' · manual' : ''}` : `${candidate.category.replaceAll('_', ' ').toLowerCase()} · ${candidate.source}`} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'}</p>
                     {candidate.occurrences[0] && <p className="candidate-location">{candidate.occurrences[0].location}{candidate.occurrencesTruncated ? ' · locations truncated' : ''}</p>}
                     <div className="graph-actions">
                       <button className={`small-btn ${candidate.decision === 'included' ? 'primary' : ''}`} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'included' ? 'suggested' : 'included')}>{candidate.decision === 'included' ? 'Included' : 'Include'}</button>

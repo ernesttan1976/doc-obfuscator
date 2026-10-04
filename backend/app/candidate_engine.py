@@ -23,6 +23,7 @@ CANDIDATE_LEVELS = {
     "PHONE": 1,
     "DATE": 2,
     "IDENTIFIER": 2,
+    "NER_ENTITY": 5,
     "CAPITALIZED_PHRASE": 5,
     "MANUAL": 1,
 }
@@ -93,6 +94,7 @@ def analyze_candidates(
     version_id: str,
     existing_nodes: Iterable[dict[str, object]] = (),
     manual_terms: Iterable[str] = (),
+    ner_entities: Iterable[dict[str, object]] = (),
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Extract conservative local candidates and unconfirmed fuzzy proposals."""
     blocks = tuple(blocks)
@@ -139,6 +141,38 @@ def analyze_candidates(
                 end,
             )
 
+    block_text_by_location = {block.location: block.text for block in blocks}
+    for entity in ner_entities:
+        term = str(entity.get("text", "")).strip()
+        location = str(entity.get("location", ""))
+        start = entity.get("start")
+        end = entity.get("end")
+        label = str(entity.get("label", "entity")).strip().lower()
+        score = entity.get("score", 0.0)
+        if (
+            not term
+            or len(term) > 256
+            or not isinstance(start, int)
+            or not isinstance(end, int)
+            or start < 0
+            or end <= start
+            or location not in block_text_by_location
+            or block_text_by_location[location][start:end] != term
+        ):
+            continue
+        _add_occurrence(
+            collected,
+            category_counts,
+            term,
+            "NER_ENTITY",
+            location,
+            start,
+            end,
+            source="ner",
+            ner_label=label,
+            ner_score=float(score),
+        )
+
     for term in manual_terms:
         clean_term = " ".join(term.split())
         if not clean_term or len(clean_term) > 256 or any(ord(char) < 32 for char in clean_term):
@@ -182,7 +216,11 @@ def analyze_candidates(
                 "term": term,
                 "category": record["category"],
                 "level": CANDIDATE_LEVELS[str(record["category"])],
-                "source": "manual" if record["manual"] else "pattern",
+                "source": (
+                    "manual" if record["manual"] else "ner" if "ner" in record["sources"] else "pattern"
+                ),
+                "nerLabels": sorted(record["nerLabels"]),
+                "nerScore": record["nerScore"],
                 "occurrences": occurrences[:MAX_OCCURRENCES_PER_CANDIDATE],
                 "occurrenceCount": record["occurrenceCount"],
                 "occurrencesTruncated": record["occurrenceCount"] > MAX_OCCURRENCES_PER_CANDIDATE,
@@ -248,6 +286,10 @@ def _add_occurrence(
     location: str,
     start: int,
     end: int,
+    *,
+    source: str = "pattern",
+    ner_label: str | None = None,
+    ner_score: float = 0.0,
 ) -> None:
     normalized = " ".join(term.split()).casefold()
     if not normalized:
@@ -262,6 +304,9 @@ def _add_occurrence(
             "occurrences": [],
             "occurrenceCount": 0,
             "manual": category == "MANUAL",
+            "sources": set(),
+            "nerLabels": set(),
+            "nerScore": 0.0,
         }
         collected[normalized] = current
         category_counts[category] = category_counts.get(category, 0) + 1
@@ -271,6 +316,14 @@ def _add_occurrence(
         category_counts[previous_category] -= 1
         category_counts[category] = category_counts.get(category, 0) + 1
     current["manual"] = bool(current["manual"]) or category == "MANUAL"
+    sources = current["sources"]
+    assert isinstance(sources, set)
+    sources.add(source)
+    ner_labels = current["nerLabels"]
+    assert isinstance(ner_labels, set)
+    if ner_label:
+        ner_labels.add(ner_label)
+        current["nerScore"] = max(float(current["nerScore"]), ner_score)
     occurrences = current["occurrences"]
     assert isinstance(occurrences, list)
     occurrence = {"location": location, "start": start, "end": end}
@@ -282,7 +335,15 @@ def _add_occurrence(
 
 
 def _category_priority(category: str) -> int:
-    return {"EMAIL": 0, "PHONE": 0, "DATE": 1, "IDENTIFIER": 1, "MANUAL": 0, "CAPITALIZED_PHRASE": 2}.get(category, 3)
+    return {
+        "EMAIL": 0,
+        "PHONE": 0,
+        "DATE": 1,
+        "IDENTIFIER": 1,
+        "MANUAL": 0,
+        "NER_ENTITY": 2,
+        "CAPITALIZED_PHRASE": 3,
+    }.get(category, 4)
 
 
 def _candidate_id(version_id: str, normalized_term: str) -> str:
