@@ -85,18 +85,9 @@ npm run preview
 
 Stages 6–9 now include connected review/export/restoration workflows, encrypted backup/restore, idle locking, resumable model artifact downloads, and macOS/Windows launch/setup scripts. Stage 10 has a synthetic-data end-to-end acceptance foundation. Real OS credential prompts and installation, model inference/resource limits, browser keyboard/responsive acceptance, human pilot, and 100 MB performance gates remain before release; see `IMPLEMENTATION_PLAN.md`.
 
-
-
-
-## Backend
-pids=$(lsof -tiTCP:8765 -sTCP:LISTEN)
-if [ -n "$pids" ]; then
-  ps -p "$pids" -o pid=,command=
-  kill $pids
-  while lsof -tiTCP:8765 -sTCP:LISTEN >/dev/null 2>&1; do sleep 1; done
-fi
-uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8765 --log-level info --access-log
-
-
-## Frontend
-npm run dev
+## Command to Start the App
+```
+uv sync --extra dev
+npm ci
+npm run dev:app
+```
