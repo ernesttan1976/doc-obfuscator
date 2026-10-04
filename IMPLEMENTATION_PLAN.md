@@ -191,7 +191,7 @@ Development keeps the existing high-fidelity React design. Release serving must 
 - [x] Imported the OpenDesign source and retained the existing PRD.
 - [x] Captured platform, format, model, privacy, storage, and workflow decisions.
 - [x] Stage 1: baseline local React + FastAPI runtime and test/security scaffolding.
-- [x] Stage 2: native project-folder selection, create/open UI and API, SQLite schema, OS-protected data key, AES-GCM-encrypted graph/map sidecar, and missing-key errors.
+- [x] Stage 2: native project/document pickers, create/open/import UI and API, SQLite document/version records, read-only source copies, OS-protected data key, AES-GCM-encrypted graph/map sidecar, and missing-key errors.
 - [ ] Stages 3–10: not started. Per the user's latest instruction, stop implementation after Stage 2; later stages remain plan-only.
 
-**Stage 2 boundary:** the UI still shows clearly labeled unsaved demo documents. Persistent document intake is Stage 3. Idle relock and portable encrypted backup remain release-hardening work (Stage 9); the chosen unlock policy is OS reauthentication, not a UI-only lock.
+**Stage 2 boundary:** imported originals are saved and versioned but not parsed or modified; the UI clearly labels demo samples as unsaved. Text preview and document processing begin in Stage 3. Idle relock and portable encrypted backup remain release-hardening work (Stage 9); the chosen unlock policy is OS reauthentication, not a UI-only lock.

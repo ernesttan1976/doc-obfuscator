@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
+import tempfile
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,8 @@ MANIFEST_NAME = "project.json"
 DATABASE_NAME = "project.sqlite3"
 STATE_NAME = "private-state.enc"
 STATE_VERSION = 1
+MAX_DOCUMENT_BYTES = 100 * 1024 * 1024
+SUPPORTED_DOCUMENT_EXTENSIONS = {".docx", ".pptx", ".txt", ".md", ".csv", ".xlsx"}
 
 
 class ProjectError(Exception):
@@ -34,6 +39,23 @@ class ProjectSummary:
             "name": self.name,
             "status": "ready",
             "graphProtection": "encrypted",
+        }
+
+
+@dataclass(frozen=True)
+class DocumentSummary:
+    document_id: str
+    name: str
+    extension: str
+    version_id: str
+
+    def to_public_dict(self) -> dict[str, str]:
+        return {
+            "id": self.document_id,
+            "name": self.name,
+            "type": self.extension.lstrip(".").upper(),
+            "versionId": self.version_id,
+            "status": "original",
         }
 
 
@@ -97,6 +119,120 @@ class ProjectService:
         except Exception as exc:
             raise ProjectError("The project is incomplete, locked, or its encrypted state is damaged.") from exc
         return ProjectSummary(project_id, name, root)
+
+    def list_documents(self, directory: str | Path) -> list[DocumentSummary]:
+        root = self._validate_directory(directory)
+        self.open(root)
+        connection = sqlite3.connect(root / ".blot" / DATABASE_NAME)
+        try:
+            rows = connection.execute(
+                """
+                SELECT d.id, d.display_name, d.extension, v.id
+                FROM documents AS d
+                JOIN versions AS v ON v.document_id = d.id
+                WHERE v.kind = 'original'
+                ORDER BY d.created_at, d.id
+                """
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise ProjectError("Project document metadata could not be read.") from exc
+        finally:
+            connection.close()
+        return [DocumentSummary(*row) for row in rows]
+
+    def import_documents(self, directory: str | Path, sources: list[str | Path]) -> list[DocumentSummary]:
+        root = self._validate_directory(directory)
+        self.open(root)
+        if not sources:
+            raise ProjectError("Choose at least one document to import.")
+
+        prepared: list[tuple[Path, str, int]] = []
+        for source_value in sources:
+            source = Path(source_value).expanduser()
+            if not source.is_absolute():
+                raise ProjectError("Selected document paths must be absolute.")
+            try:
+                source = source.resolve(strict=True)
+                metadata = source.stat()
+            except (OSError, RuntimeError) as exc:
+                raise ProjectError("A selected document is missing or cannot be read.") from exc
+            extension = source.suffix.lower()
+            if not source.is_file() or extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
+                raise ProjectError("Select only DOCX, PPTX, TXT, MD, CSV, or XLSX documents.")
+            if metadata.st_size > MAX_DOCUMENT_BYTES:
+                raise ProjectError("A selected document exceeds the 100 MB project limit.")
+            prepared.append((source, extension, metadata.st_size))
+
+        private_dir = root / ".blot"
+        originals_dir = private_dir / "originals"
+        try:
+            originals_dir.mkdir(mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise ProjectError("The project originals folder could not be created.") from exc
+        inserted: list[DocumentSummary] = []
+        created_directories: list[Path] = []
+        try:
+            for source, extension, expected_size in prepared:
+                document_id = str(uuid.uuid4())
+                version_id = str(uuid.uuid4())
+                document_dir = originals_dir / document_id
+                document_dir.mkdir(mode=0o700)
+                created_directories.append(document_dir)
+                relative_path = Path("originals") / document_id / f"original{extension}"
+                destination = private_dir / relative_path
+                temporary_path: Path | None = None
+                try:
+                    with source.open("rb") as input_file, tempfile.NamedTemporaryFile(
+                        dir=document_dir, prefix=".import-", delete=False
+                    ) as output_file:
+                        temporary_path = Path(output_file.name)
+                        copied_size = 0
+                        while chunk := input_file.read(1024 * 1024):
+                            copied_size += len(chunk)
+                            if copied_size > MAX_DOCUMENT_BYTES:
+                                raise ProjectError("A selected document exceeds the 100 MB project limit.")
+                            output_file.write(chunk)
+                        output_file.flush()
+                        os.fsync(output_file.fileno())
+                    actual_size = temporary_path.stat().st_size
+                    if actual_size != expected_size or copied_size != expected_size:
+                        raise ProjectError("A selected document changed during import; no original was saved.")
+                    temporary_path.chmod(0o400)
+                    os.replace(temporary_path, destination)
+                finally:
+                    if temporary_path is not None:
+                        temporary_path.unlink(missing_ok=True)
+
+                summary = DocumentSummary(document_id, source.name, extension, version_id)
+                inserted.append(summary)
+
+            connection = sqlite3.connect(private_dir / DATABASE_NAME)
+            try:
+                timestamp = datetime.now(UTC).isoformat()
+                with connection:
+                    for summary in inserted:
+                        relative_path = (
+                            Path("originals") / summary.document_id / f"original{summary.extension}"
+                        ).as_posix()
+                        connection.execute(
+                            "INSERT INTO documents(id, display_name, extension, status, original_path, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (summary.document_id, summary.name, summary.extension, "original", relative_path, timestamp),
+                        )
+                        connection.execute(
+                            "INSERT INTO versions(id, document_id, parent_version_id, kind, relative_path, status, created_at) "
+                            "VALUES (?, ?, NULL, ?, ?, ?, ?)",
+                            (summary.version_id, summary.document_id, "original", relative_path, "ready", timestamp),
+                        )
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error) as exc:
+            self._remove_import_directories(created_directories)
+            raise ProjectError("Could not save the selected document in this project.") from exc
+        except Exception:
+            self._remove_import_directories(created_directories)
+            raise
+        return inserted
 
     def load_private_state(self, directory: str | Path) -> dict[str, Any]:
         root = self._validate_directory(directory)
@@ -202,3 +338,9 @@ class ProjectService:
                         nested.unlink(missing_ok=True)
                 child.rmdir()
         private_dir.rmdir()
+
+    @staticmethod
+    def _remove_import_directories(directories: list[Path]) -> None:
+        for directory in directories:
+            if directory.exists():
+                shutil.rmtree(directory)

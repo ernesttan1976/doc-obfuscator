@@ -91,7 +91,7 @@ export default function App() {
   const [undo, setUndo] = useState(null);
   const [, setReplacementMaps] = useState({});
 
-  const activeFile = files.find((file) => file.name === activeName) || files[0];
+  const activeFile = files.find((file) => (file.id || file.name) === activeName) || files[0];
   const activeText = activeFile.rawText ?? activeFile.content.join(activeFile.lineEnding || '\n');
   const decisions = decisionSets[activeName] || { alex: 'suggested', cedar: 'suggested' };
   const confirmed = confirmationSets[activeName] || { alex: true, cedar: false };
@@ -195,6 +195,49 @@ export default function App() {
     }
   };
 
+  const importProjectDocuments = async () => {
+    if (!currentProject || !projectDirectory || !localToken) {
+      setToast('Open a local project and start the service before importing documents');
+      return;
+    }
+    setProjectBusy(true);
+    try {
+      const pickerResponse = await fetch('/api/dialogs/document-files', {
+        headers: { 'X-Local-App-Token': localToken },
+        cache: 'no-store',
+      });
+      const selection = await pickerResponse.json();
+      if (!pickerResponse.ok) throw new Error(selection.detail || 'Could not open the document picker');
+      if (selection.cancelled) return;
+      const response = await fetch('/api/projects/documents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: projectDirectory, files: selection.files }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not save the selected documents');
+      const imported = data.documents.map((document) => ({
+        id: document.id,
+        name: document.name,
+        type: document.type,
+        status: 'Saved original · v01',
+        content: ['This original is stored in the local project. Its contents have not been read or modified. Text preview arrives in Stage 3.'],
+        rawText: '',
+        heading: `${document.name} · saved original`,
+        isProjectDocument: true,
+      }));
+      setFiles((current) => [...imported, ...current.filter((file) => !imported.some((document) => document.id === file.id))]);
+      setActiveName(imported[0].id);
+      setSelectedGroup('alex');
+      setView('preview');
+      setToast(`${imported.length} original${imported.length === 1 ? '' : 's'} copied into the local project`);
+    } catch (error) {
+      setToast(error.message || 'Could not import the selected documents');
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
   const exportCopy = () => {
     if (currentProject) {
       setToast('Export is not yet connected to saved project documents. No project files were changed.');
@@ -270,7 +313,19 @@ export default function App() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not open this project');
+      const savedDocuments = (data.documents || []).map((document) => ({
+        id: document.id,
+        name: document.name,
+        type: document.type,
+        status: 'Saved original · v01',
+        content: ['This original is stored in the local project. Its contents have not been read or modified. Text preview arrives in Stage 3.'],
+        rawText: '',
+        heading: `${document.name} · saved original`,
+        isProjectDocument: true,
+      }));
       setCurrentProject(data);
+      setFiles([...savedDocuments, ...initialFiles]);
+      setActiveName(savedDocuments[0]?.id || initialFiles[0].name);
       setProjectModalOpen(false);
       setToast(`${projectAction === 'create' ? 'Created' : 'Opened'} local project “${data.name}”`);
     } catch (error) {
@@ -296,7 +351,7 @@ export default function App() {
   };
 
   const switchFile = (file) => {
-    setActiveName(file.name);
+    setActiveName(file.id || file.name);
     setSelectedGroup('alex');
     setView('preview');
     setUndo(null);
@@ -312,13 +367,13 @@ export default function App() {
         <div className="side-spacer" /><div className="local-badge"><span className="status-dot" style={{ background: serviceAvailable ? 'var(--success)' : 'var(--warn)' }} /><span><strong style={{ color: 'var(--accent-on)' }}>{serviceAvailable ? 'Local service ready' : 'UI preview mode'}</strong><br />{serviceAvailable ? 'Document content stays on this computer.' : 'Start FastAPI for local projects.'}</span></div>
       </aside>
       <main className="main">
-        <header className="topbar"><div className="crumbs"><span>{currentProject?.name || 'Cedar briefing · demo'}</span><span>/</span><strong>{activeFile.name}</strong></div><div className="top-actions"><button className="text-btn" onClick={() => setToast('Encrypted backup is planned after project storage is complete')}>Encrypted backup</button><button className="icon-btn" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀' : '☾'}</button><button className="icon-btn" aria-label="Open local settings" onClick={() => setToast('Local settings are available in the service configuration')}>•••</button><button className="primary-btn" onClick={() => currentProject ? setToast('Persistent file import is planned for the next stage') : setModalOpen(true)}>Import file</button></div></header>
+        <header className="topbar"><div className="crumbs"><span>{currentProject?.name || 'Cedar briefing · demo'}</span><span>/</span><strong>{activeFile.name}</strong></div><div className="top-actions"><button className="text-btn" onClick={() => setToast('Encrypted backup is planned for release hardening')}>Encrypted backup</button><button className="icon-btn" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀' : '☾'}</button><button className="icon-btn" aria-label="Open local settings" onClick={() => setToast('Local settings are available in the service configuration')}>•••</button><button className="primary-btn" disabled={currentProject && projectBusy} onClick={() => currentProject ? importProjectDocuments() : setModalOpen(true)}>{projectBusy ? 'Working…' : 'Import file'}</button></div></header>
         <div className="workspace">
           <div className="page-head"><div><p className="eyebrow">Document review · version 03</p><h1>Prepare a safe copy</h1><p className="subhead">Review suggested terms before this editable-text document leaves your computer. Similarity is a prompt, never a decision.</p></div><button className="primary-btn" onClick={exportCopy}>Export obfuscated copy</button></div>
           <section className="layout">
-            <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Demo preview files' : 'Project files'}</span><span className="panel-meta">{currentProject ? 'not saved' : `${files.length} items`}</span></div><div className="file-list">{files.map((file) => <button key={file.name} className={`file-item ${file.name === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span><span className="file-name">{file.name}</span><span className="file-status">{currentProject ? 'Synthetic sample · not saved' : file.status}</span></span><span className="file-check">{file.name === activeName ? '●' : file.status.includes('Ready') ? '✓' : file.status.includes('Restore') ? '↗' : ''}</span></button>)}</div></aside>
+            <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${files.filter((file) => file.isProjectDocument).length} saved` : `${files.length} items`}</span></div><div className="file-list">{files.map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span><span className="file-name">{file.name}</span><span className="file-status">{file.isProjectDocument ? file.status : currentProject ? 'Synthetic sample · not saved' : file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : file.status.includes('Restore') ? '↗' : ''}</span></button>)}</div></aside>
             <section className="panel review-panel">
-              <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>Editable text view · {activeFile.content.length} {activeFile.type === 'PPTX' ? 'slides' : 'pages'} · local preview</span></div><div className="view-switch" role="tablist" aria-label="Document view"><button className={view === 'preview' ? 'active' : ''} role="tab" aria-selected={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button className={view === 'changes' ? 'active' : ''} role="tab" aria-selected={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div>
+              <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? 'Original source · not parsed or modified' : `Editable text view · ${activeFile.content.length} ${activeFile.type === 'PPTX' ? 'slides' : 'pages'} · local preview`}</span></div><div className="view-switch" role="tablist" aria-label="Document view"><button className={view === 'preview' ? 'active' : ''} role="tab" aria-selected={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button className={view === 'changes' ? 'active' : ''} role="tab" aria-selected={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div>
               <div className="slider-area"><div className="slider-labels"><label htmlFor="sensitivity">Candidate breadth</label><span className="slider-value">Level {level} / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value={level} onChange={(event) => setLevel(Number(event.target.value))} /><div className="range-notes"><span>Narrow · high confidence</span><span>All detected candidates</span></div></div>
               {view === 'preview' ? <div className="preview"><div className="preview-note"><span className="status-dot" /><span>{visibleGroups.length} suggested groups are visible at this level. Click a highlighted term to decide.</span></div><article className="doc-page"><div className="doc-kicker">BOARD UPDATE · 04 OCTOBER 2026</div><h2>{activeFile.heading}</h2>{activeFile.content.map((paragraph, index) => <p key={`${activeFile.name}-${index}`}>{renderParagraph(paragraph)}</p>)}<div className="legend"><span className="legend-item"><span className="legend-swatch" />Suggested</span><span className="legend-item"><span className="legend-swatch manual" />Manual decision</span><span className="legend-item">Click a term to inspect its group</span></div></article><div className="preview-foot"><span><strong>{matchCount}</strong> occurrences will change at level <strong>{level}</strong></span><span>Original stays unchanged · new version on export</span></div>{undo?.file === activeName && <button className="small-btn undo-button" onClick={undoDecision}>Undo last decision</button>}</div> : <div className="preview changes-pane"><div className="preview-note"><span className="status-dot" /><span>Export diff for version 03</span></div><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr style={{ color: 'var(--muted)', font: '11px var(--font-mono)', textAlign: 'left' }}><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>OCCURRENCE</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>REPLACEMENT</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>DECISION</th></tr></thead><tbody>{changeRows.map(({ group, occurrences, decision }) => <tr key={group.id}><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{group.term} · {occurrences} {occurrences === 1 ? 'match' : 'matches'}</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>[[{group.token}]]</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{decision === 'excluded' ? 'Excluded' : decision === 'included' ? 'Included' : 'Suggested'}</td></tr>)}</tbody></table></div>}
             </section>

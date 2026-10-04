@@ -1,8 +1,11 @@
+import os
 import secrets
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from backend.app import folder_picker
 from backend.app import main as main_module
 from backend.app.key_store import KeyStoreUnavailable
 from backend.app.local_crypto import EncryptedStateError, decrypt_state, encrypt_state
@@ -153,6 +156,56 @@ def test_project_open_requires_its_os_protected_key(tmp_path):
         ProjectService(MemoryKeyStore()).open(root)
 
 
+def test_project_import_copies_an_immutable_original_and_records_version(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "meeting notes.TXT"
+    root.mkdir()
+    source.write_text("Alex Tan — confidential", encoding="utf-8")
+    service = ProjectService(MemoryKeyStore())
+    service.create(root, "Project")
+
+    imported = service.import_documents(root, [source])
+    original = root / ".blot" / "originals" / imported[0].document_id / "original.txt"
+    listed = service.list_documents(root)
+
+    assert len(imported) == 1
+    assert imported[0].name == source.name
+    assert original.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert source.read_text(encoding="utf-8") == "Alex Tan — confidential"
+    assert listed == imported
+    if os.name != "nt":
+        assert original.stat().st_mode & 0o777 == 0o400
+
+
+def test_project_import_rejects_unsupported_files_without_copying(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "script.py"
+    root.mkdir()
+    source.write_text("print('not a document')", encoding="utf-8")
+    service = ProjectService(MemoryKeyStore())
+    service.create(root, "Project")
+
+    with pytest.raises(ProjectError, match="Select only"):
+        service.import_documents(root, [source])
+
+    assert not (root / ".blot" / "originals").exists()
+
+
+def test_project_import_rejects_files_over_100_mb_before_copying(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "large.txt"
+    root.mkdir()
+    with source.open("wb") as large_file:
+        large_file.truncate(100 * 1024 * 1024 + 1)
+    service = ProjectService(MemoryKeyStore())
+    service.create(root, "Project")
+
+    with pytest.raises(ProjectError, match="100 MB"):
+        service.import_documents(root, [source])
+
+    assert not (root / ".blot" / "originals").exists()
+
+
 @pytest.mark.anyio
 async def test_project_api_requires_launch_token_and_encrypts_initial_state(tmp_path):
     root = tmp_path / "project"
@@ -174,6 +227,38 @@ async def test_project_api_requires_launch_token_and_encrypts_initial_state(tmp_
 
 
 @pytest.mark.anyio
+async def test_project_document_import_is_token_protected_and_returns_saved_versions(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "notes.md"
+    root.mkdir()
+    source.write_text("Synthetic project notes", encoding="utf-8")
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        await client.post(
+            "/api/projects",
+            json={"name": "Project", "directory": str(root)},
+            headers={"X-Local-App-Token": app.state.local_token},
+        )
+        payload = {"directory": str(root), "files": [str(source)]}
+        denied = await client.post("/api/projects/documents", json=payload)
+        imported = await client.post(
+            "/api/projects/documents",
+            json=payload,
+            headers={"X-Local-App-Token": app.state.local_token},
+        )
+        opened = await client.post(
+            "/api/projects/open",
+            json={"directory": str(root)},
+            headers={"X-Local-App-Token": app.state.local_token},
+        )
+
+    assert denied.status_code == 401
+    assert imported.status_code == 200
+    assert imported.json()["documents"][0]["status"] == "original"
+    assert opened.json()["documents"] == imported.json()["documents"]
+
+
+@pytest.mark.anyio
 async def test_native_folder_picker_is_token_protected_and_returns_only_user_selection(tmp_path, monkeypatch):
     selected = tmp_path / "local project"
     monkeypatch.setattr(main_module, "pick_project_directory", lambda: selected)
@@ -188,3 +273,50 @@ async def test_native_folder_picker_is_token_protected_and_returns_only_user_sel
     assert denied.status_code == 401
     assert accepted.status_code == 200
     assert accepted.json() == {"cancelled": False, "directory": str(selected)}
+
+
+@pytest.mark.anyio
+async def test_native_document_picker_is_token_protected_and_returns_selected_files(tmp_path, monkeypatch):
+    selected = [tmp_path / "notes.md", tmp_path / "plan.docx"]
+    monkeypatch.setattr(main_module, "pick_document_files", lambda: selected)
+    app, client_context = local_client(tmp_path)
+    async with client_context as client:
+        denied = await client.get("/api/dialogs/document-files")
+        accepted = await client.get(
+            "/api/dialogs/document-files",
+            headers={"X-Local-App-Token": app.state.local_token},
+        )
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json() == {"cancelled": False, "files": [str(path) for path in selected]}
+
+
+@pytest.mark.parametrize(
+    ("platform", "output"),
+    [
+        ("darwin", "/tmp/notes.md\n/tmp/brief.docx\n"),
+        ("win32", "C:\\Users\\Example\\notes.md\r\nC:\\Users\\Example\\brief.docx\r\n"),
+    ],
+)
+def test_native_document_picker_builds_multi_select_dialog(platform, output, monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+    monkeypatch.setattr(folder_picker.sys, "platform", platform)
+    monkeypatch.setattr(folder_picker.subprocess, "run", fake_run)
+
+    selected = folder_picker.pick_document_files()
+
+    assert [str(path) for path in selected] == output.splitlines()
+    command, options = calls[0]
+    assert options["timeout"] == 180
+    if platform == "win32":
+        assert "-STA" in command
+        assert "Multiselect = $true" in command[-1]
+        assert ";" in command[-1]
+    else:
+        assert "multiple selections allowed" in " ".join(command)

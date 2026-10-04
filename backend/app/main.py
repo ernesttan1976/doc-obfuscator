@@ -14,7 +14,11 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .folder_picker import FolderPickerError, pick_project_directory
+from .folder_picker import (
+    FolderPickerError,
+    pick_document_files,
+    pick_project_directory,
+)
 from .key_store import KeyStoreUnavailable, OSKeyringProjectKeyStore, ProjectKeyStore
 from .projects import ProjectError, ProjectService
 
@@ -69,6 +73,11 @@ class CreateProjectRequest(BaseModel):
 
 class OpenProjectRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=4096)
+
+
+class ImportDocumentsRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    files: list[str] = Field(min_length=1, max_length=100)
 
 
 def create_app(
@@ -132,18 +141,25 @@ def create_app(
         return app.state.project_service
 
     @app.post("/api/projects", status_code=status.HTTP_201_CREATED)
-    def create_project(payload: CreateProjectRequest) -> dict[str, str]:
+    def create_project(payload: CreateProjectRequest) -> dict[str, object]:
         try:
-            return project_service().create(payload.directory, payload.name).to_public_dict()
+            project = project_service().create(payload.directory, payload.name)
+            return {**project.to_public_dict(), "documents": []}
         except KeyStoreUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ProjectError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/projects/open")
-    def open_project(payload: OpenProjectRequest) -> dict[str, str]:
+    def open_project(payload: OpenProjectRequest) -> dict[str, object]:
         try:
-            return project_service().open(payload.directory).to_public_dict()
+            service = project_service()
+            project = service.open(payload.directory)
+            documents = service.list_documents(payload.directory)
+            return {
+                **project.to_public_dict(),
+                "documents": [document.to_public_dict() for document in documents],
+            }
         except KeyStoreUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ProjectError as exc:
@@ -158,6 +174,26 @@ def create_app(
         if selected is None:
             return {"cancelled": True}
         return {"cancelled": False, "directory": str(selected)}
+
+    @app.get("/api/dialogs/document-files")
+    def choose_document_files() -> dict[str, object]:
+        try:
+            selected = pick_document_files()
+        except FolderPickerError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        if selected is None:
+            return {"cancelled": True}
+        return {"cancelled": False, "files": [str(path) for path in selected]}
+
+    @app.post("/api/projects/documents")
+    def import_project_documents(payload: ImportDocumentsRequest) -> dict[str, object]:
+        try:
+            documents = project_service().import_documents(payload.directory, payload.files)
+            return {"documents": [document.to_public_dict() for document in documents]}
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     index_file = frontend_dist / "obfuscation-workspace.html"
 
