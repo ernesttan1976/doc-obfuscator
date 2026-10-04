@@ -17,7 +17,7 @@ def render_docx_to_pdf(source: bytes) -> bytes:
     executable = shutil.which("soffice") or shutil.which("libreoffice")
     if executable is None:
         raise PagePreviewError(
-            "Install LibreOffice to preview DOCX pages. The supported-text preview is still available."
+            "Install LibreOffice to preview DOCX pages."
         )
 
     try:
@@ -51,6 +51,6 @@ def render_docx_to_pdf(source: bytes) -> bytes:
                 raise PagePreviewError("LibreOffice returned an invalid page preview.")
             return pdf
     except subprocess.TimeoutExpired as exc:
-        raise PagePreviewError("DOCX page rendering took too long. The text preview is still available.") from exc
+        raise PagePreviewError("DOCX page rendering took too long. Retry with a smaller document or check LibreOffice.") from exc
     except OSError as exc:
         raise PagePreviewError("LibreOffice could not render this DOCX page preview.") from exc

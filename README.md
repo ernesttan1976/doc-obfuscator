@@ -31,7 +31,7 @@ Opening a saved TXT or MD shows a local text preview with UTF-8/UTF-16 encoding 
 
 ## Review and export a saved project document
 
-DOCX **Page view** renders the selected version locally with LibreOffice and lets you move through the resulting pages. Install LibreOffice to enable this view; supported-text **Text view** remains available without it. Pagination comes from the document renderer rather than guessed page breaks in DOCX XML.
+DOCX pages are rendered locally with LibreOffice and PDF.js. Candidate mentions are highlighted on the rendered page; click to include, double-click to exclude, or right-click for options. The selectable text layer also supports manual phrase selection. The DOCX UI uses rendered pages rather than exposing raw OOXML text-part sections as a separate view. Install LibreOffice to enable DOCX page rendering. Pagination comes from the document renderer rather than guessed page breaks in DOCX XML.
 
 Each candidate is assigned a sensitivity score from 1 (unlikely sensitive) to 10 (very likely sensitive). Set the slider to a minimum score to filter suggestions; Include and Exclude decisions remain available and override the filter.
 

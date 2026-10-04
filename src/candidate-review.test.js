@@ -6,6 +6,7 @@ import {
   getCandidatesNotSelectedAtLevel,
   getVisibleCandidates,
 } from './candidate-review.js';
+import { findPageTermMatches } from './page-highlights.js';
 
 const candidates = [
   { id: 'email', level: 2, decision: 'suggested' },
@@ -46,4 +47,20 @@ test('unselected candidates are counted outside the active priority range', () =
   assert.equal(getCandidatesNotSelectedAtLevel(candidates, 1), candidates.length);
   assert.equal(getCandidatesNotSelectedAtLevel(candidates, 5), 4);
   assert.equal(getCandidatesNotSelectedAtLevel(candidates, 10), 1);
+});
+
+test('page term matching is case-insensitive and prefers the longest overlapping candidate', () => {
+  const alex = { id: 'alex', term: 'Alex Tan' };
+  const tan = { id: 'tan', term: 'Tan' };
+  const cedar = { id: 'cedar', term: 'Project Cedar' };
+
+  assert.deepEqual(
+    findPageTermMatches('ALEX TAN met Alex Tan at Project Cedar.', [tan, alex, cedar])
+      .map(({ start, end, candidate }) => ({ text: 'ALEX TAN met Alex Tan at Project Cedar.'.slice(start, end), id: candidate.id })),
+    [
+      { text: 'ALEX TAN', id: 'alex' },
+      { text: 'Alex Tan', id: 'alex' },
+      { text: 'Project Cedar', id: 'cedar' },
+    ],
+  );
 });
