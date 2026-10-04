@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -88,6 +88,26 @@ class ImportDocumentsRequest(BaseModel):
 class PreviewDocumentRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=4096)
     document_id: str = Field(min_length=1, max_length=100)
+    version_id: str | None = Field(default=None, max_length=100)
+
+
+class ExportPreviewRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
+    level: int = Field(ge=1, le=10)
+
+
+class ExportObfuscationRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
+    plan_id: str = Field(min_length=1, max_length=100)
+    acknowledge_warnings: bool = False
+
+
+class DocumentVersionRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
+    version_id: str = Field(min_length=1, max_length=100)
 
 
 class AnalyzeCandidatesRequest(BaseModel):
@@ -288,13 +308,62 @@ def create_app(
     @app.post("/api/projects/document-preview")
     def preview_project_document(payload: PreviewDocumentRequest) -> dict[str, object]:
         try:
-            return project_service().preview_document(payload.directory, payload.document_id)
+            return project_service().preview_document(
+                payload.directory,
+                payload.document_id,
+                payload.version_id,
+            )
         except KeyStoreUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except DocumentAdapterError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ProjectError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/export-preview")
+    def preview_project_obfuscation(payload: ExportPreviewRequest) -> dict[str, object]:
+        try:
+            return project_service().preview_obfuscation(
+                payload.directory,
+                payload.document_id,
+                payload.level,
+            )
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except DocumentAdapterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/export")
+    def export_project_obfuscation(payload: ExportObfuscationRequest) -> dict[str, object]:
+        try:
+            return project_service().export_obfuscation(
+                payload.directory,
+                payload.document_id,
+                payload.plan_id,
+                payload.acknowledge_warnings,
+            )
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except DocumentAdapterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/projects/document-version-download")
+    def download_project_version(payload: DocumentVersionRequest) -> Response:
+        try:
+            path, filename = project_service().document_version_download(
+                payload.directory,
+                payload.document_id,
+                payload.version_id,
+            )
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(path, filename=filename, media_type="application/octet-stream")
 
     @app.post("/api/projects/document-candidates")
     def analyze_project_document_candidates(payload: AnalyzeCandidatesRequest) -> dict[str, object]:

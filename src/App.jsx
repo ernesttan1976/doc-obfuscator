@@ -107,13 +107,21 @@ export default function App() {
   const [minilmModelStatus, setMinilmModelStatus] = useState(null);
   const [currentProject, setCurrentProject] = useState(null);
   const [projectBusy, setProjectBusy] = useState(false);
+  const [exportPreview, setExportPreview] = useState(null);
+  const [exportAcknowledged, setExportAcknowledged] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
   const [manualPhrase, setManualPhrase] = useState('');
   const [mergeGroupIds, setMergeGroupIds] = useState([]);
   const [toast, setToast] = useState('');
   const [undo, setUndo] = useState(null);
   const [, setReplacementMaps] = useState({});
 
-  const activeFile = files.find((file) => (file.id || file.name) === activeName) || files[0];
+  const activeFile = files.find((file) => (file.id || file.name) === activeName) || files[0] || initialFiles[0];
+  const projectDocuments = files.filter((file) => file.isProjectDocument);
+  const projectHasNoDocuments = Boolean(currentProject && projectDocuments.length === 0);
+  const activeVersion = activeFile?.versions?.find((version) => version.id === activeFile.selectedVersionId)
+    || { id: activeFile?.versionId, kind: 'original', status: 'ready' };
+  const reviewableProjectDocument = Boolean(activeFile?.isProjectDocument && activeVersion.kind === 'original');
   const activeText = activeFile.rawText ?? activeFile.content.join(activeFile.lineEnding || '\n');
   const previewSections = activeFile.previewSections || [];
   const activeSection = previewSections[sectionIndex];
@@ -126,9 +134,13 @@ export default function App() {
     const occurrences = countGroupMatches(activeText, members);
     return occurrences ? [{ group, members, occurrences, decision: decisions[group.id] }] : [];
   });
-  const matchCount = changeRows.reduce((sum, row) => sum + (row.decision === 'excluded' ? 0 : row.occurrences), 0);
   const candidates = activeFile.candidates || [];
-  const visibleCandidates = getVisibleCandidates(candidates, level);
+  const matchCount = reviewableProjectDocument
+    ? candidates
+      .filter((candidate) => candidate.decision === 'included' || (candidate.decision === 'suggested' && candidate.level <= level))
+      .reduce((sum, candidate) => sum + candidate.occurrenceCount, 0)
+    : changeRows.reduce((sum, row) => sum + (row.decision === 'excluded' ? 0 : row.occurrences), 0);
+  const visibleCandidates = reviewableProjectDocument ? getVisibleCandidates(candidates, level) : [];
   const candidatesById = Object.fromEntries(candidates.map((candidate) => [candidate.id, candidate]));
   const candidateGroups = activeFile.candidateGroups || [];
   const proposals = (activeFile.proposals || []).filter((proposal) => (
@@ -143,6 +155,7 @@ export default function App() {
   const previewCoverage = activeFile.previewCoverage;
   const previewWarnings = activeFile.previewWarnings || [];
   const unsupportedPartCount = previewCoverage?.unsupportedPartCount || 0;
+  const exportPreviewText = exportPreview ? previewLines(exportPreview.preview).join('\n') : '';
 
   useEffect(() => {
     let cancelled = false;
@@ -205,7 +218,7 @@ export default function App() {
   }, [level]);
   useEffect(() => {
     const captureSelectedPhrase = () => {
-      if (!activeFile.isProjectDocument) return;
+      if (!reviewableProjectDocument) return;
       const selection = window.getSelection();
       const selected = selection?.toString().trim() || '';
       const page = document.querySelector('.doc-page');
@@ -215,7 +228,7 @@ export default function App() {
     };
     document.addEventListener('mouseup', captureSelectedPhrase);
     return () => document.removeEventListener('mouseup', captureSelectedPhrase);
-  }, [activeFile.isProjectDocument]);
+  }, [reviewableProjectDocument]);
   useEffect(() => {
     if (!toast) return undefined;
     const timer = window.setTimeout(() => setToast(''), 2600);
@@ -232,9 +245,11 @@ export default function App() {
   };
 
   const renderParagraph = (paragraph) => {
-    const terms = (activeFile.isProjectDocument
+    const terms = (reviewableProjectDocument
       ? visibleCandidates.map((candidate) => ({ member: candidate.term, candidate }))
-      : groups.flatMap((group) => getActiveMembers(group).map((member) => ({ member, group })))
+      : activeFile.isProjectDocument
+        ? []
+        : groups.flatMap((group) => getActiveMembers(group).map((member) => ({ member, group })))
     ).sort((a, b) => b.member.length - a.member.length);
     if (!terms.length) return paragraph;
     const regex = new RegExp(`(${terms.map(({ member }) => member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi');
@@ -261,6 +276,7 @@ export default function App() {
 
   const loadProjectDocumentCandidates = async (documentId, manualTerms = []) => {
     if (!projectDirectory || !localToken) return false;
+    setExportPreview(null);
     setFiles((current) => current.map((file) => (
       file.id === documentId ? { ...file, candidateLoading: true, candidateError: '' } : file
     )));
@@ -359,7 +375,7 @@ export default function App() {
     }
   };
 
-  const loadProjectDocumentPreview = async (documentId) => {
+  const loadProjectDocumentPreview = async (documentId, versionId, versionKind) => {
     if (!projectDirectory || !localToken) return;
     setFiles((current) => current.map((file) => (
       file.id === documentId ? { ...file, previewLoading: true } : file
@@ -368,7 +384,7 @@ export default function App() {
       const response = await fetch('/api/projects/document-preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
-        body: JSON.stringify({ directory: projectDirectory, document_id: documentId }),
+        body: JSON.stringify({ directory: projectDirectory, document_id: documentId, version_id: versionId || undefined }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not parse this document for preview');
@@ -380,6 +396,10 @@ export default function App() {
           content: section.text.split(/\r\n|\r|\n/),
         };
       });
+      const knownFile = files.find((file) => file.id === documentId);
+      const selectedVersionId = versionId || knownFile?.selectedVersionId || knownFile?.versionId;
+      const selectedVersion = knownFile?.versions?.find((version) => version.id === selectedVersionId)
+        || { kind: versionKind || 'original' };
       setFiles((current) => current.map((file) => (
         file.id === documentId
           ? {
@@ -399,11 +419,12 @@ export default function App() {
             previewError: false,
             previewLoaded: true,
             previewLoading: false,
-            status: 'Parsed preview · original unchanged',
+            selectedVersionId,
+            status: selectedVersion?.kind === 'obfuscated' ? 'Obfuscated copy · original unchanged' : 'Parsed preview · original unchanged',
           }
           : file
       )));
-      await loadProjectDocumentCandidates(documentId);
+      if ((selectedVersion?.kind || 'original') === 'original') await loadProjectDocumentCandidates(documentId);
     } catch (error) {
       setFiles((current) => current.map((file) => (
         file.id === documentId
@@ -423,6 +444,16 @@ export default function App() {
         ? { ...file, content: previewSections[nextIndex].content }
         : file
     )));
+  };
+
+  const selectProjectVersion = (versionId) => {
+    const version = activeFile.versions?.find((item) => item.id === versionId);
+    if (!version || version.id === activeFile.selectedVersionId) return;
+    setExportPreview(null);
+    setUndo(null);
+    setSectionIndex(0);
+    setDenseText(false);
+    void loadProjectDocumentPreview(activeFile.id, version.id, version.kind);
   };
 
   const handlePreviewNavigationKeyDown = (event) => {
@@ -452,11 +483,8 @@ export default function App() {
       });
       const updated = await response.json();
       if (!response.ok) throw new Error(updated.detail || 'Could not save this candidate decision');
-      setFiles((current) => current.map((file) => (
-        file.id === activeFile.id
-          ? { ...file, candidates: file.candidates.map((item) => item.id === updated.id ? updated : item) }
-          : file
-      )));
+      setExportPreview(null);
+      await loadProjectDocumentCandidates(activeFile.id);
       setUndo({ file: activeName, candidateId: candidate.id, decision: candidate.decision, isCandidate: true });
       setToast(`${decision === 'included' ? 'Included' : decision === 'excluded' ? 'Excluded' : 'Reset'} ${candidate.term}`);
     } catch (error) {
@@ -468,6 +496,7 @@ export default function App() {
     event.preventDefault();
     const phrase = manualPhrase.trim();
     if (!phrase) return;
+    setExportPreview(null);
     const saved = await loadProjectDocumentCandidates(activeFile.id, [phrase]);
     if (saved) {
       setManualPhrase('');
@@ -493,6 +522,7 @@ export default function App() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not update confirmed groups');
+      setExportPreview(null);
       setFiles((current) => current.map((file) => (
         file.id === activeFile.id ? { ...file, candidateGroups: data.groups } : file
       )));
@@ -560,6 +590,9 @@ export default function App() {
       if (!response.ok) throw new Error(data.detail || 'Could not save the selected documents');
       const imported = data.documents.map((document) => ({
         id: document.id,
+        versionId: document.versionId,
+        versions: document.versions || [],
+        selectedVersionId: document.versionId,
         name: document.name,
         type: document.type,
         status: 'Saved original · v01',
@@ -568,7 +601,8 @@ export default function App() {
         heading: `${document.name} · saved original`,
         isProjectDocument: true,
       }));
-      setFiles((current) => [...imported, ...current.filter((file) => !imported.some((document) => document.id === file.id))]);
+      setExportPreview(null);
+      setFiles((current) => [...imported, ...current.filter((file) => file.isProjectDocument && !imported.some((document) => document.id === file.id))]);
       setActiveName(imported[0].id);
       setSectionIndex(0);
       setDenseText(false);
@@ -583,9 +617,107 @@ export default function App() {
     }
   };
 
+  const previewProjectExport = async () => {
+    if (!reviewableProjectDocument || !currentProject || !localToken) {
+      setToast('Select an original version in an open local project before preparing an export.');
+      return;
+    }
+    setExportBusy(true);
+    setExportPreview(null);
+    setExportAcknowledged(false);
+    try {
+      const response = await fetch('/api/projects/export-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: projectDirectory, document_id: activeFile.id, level }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not prepare an obfuscated preview');
+      setExportPreview(data);
+    } catch (error) {
+      setToast(error.message || 'Could not prepare an obfuscated preview');
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
+  const approveProjectExport = async () => {
+    if (!exportPreview || exportBusy) return;
+    setExportBusy(true);
+    try {
+      const response = await fetch('/api/projects/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({
+          directory: projectDirectory,
+          document_id: activeFile.id,
+          plan_id: exportPreview.planId,
+          acknowledge_warnings: exportAcknowledged,
+        }),
+      });
+      const version = await response.json();
+      if (!response.ok) throw new Error(version.detail || 'The reviewed export could not be saved');
+      setFiles((current) => current.map((file) => (
+        file.id === activeFile.id
+          ? {
+            ...file,
+            versions: [...(file.versions || []), version],
+            selectedVersionId: version.id,
+            status: 'Obfuscated copy saved · ready to send',
+          }
+          : file
+      )));
+      setExportPreview(null);
+      setUndo(null);
+      setSectionIndex(0);
+      await loadProjectDocumentPreview(activeFile.id, version.id, 'obfuscated');
+      setView('preview');
+      if (await downloadProjectVersion(version.id, version.name)) {
+        setToast('Approved obfuscated version saved and downloaded. The original remains unchanged.');
+      }
+    } catch (error) {
+      setToast(error.message || 'The reviewed export could not be saved');
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
+  const downloadProjectVersion = async (versionId, filename) => {
+    if (!activeFile.isProjectDocument || !currentProject || !localToken) return false;
+    try {
+      const downloadResponse = await fetch('/api/projects/document-version-download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: projectDirectory, document_id: activeFile.id, version_id: versionId }),
+      });
+      if (!downloadResponse.ok) {
+        const data = await downloadResponse.json();
+        throw new Error(data.detail || 'The saved obfuscated version could not be downloaded');
+      }
+      const objectUrl = URL.createObjectURL(await downloadResponse.blob());
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = filename;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      return true;
+    } catch (error) {
+      setToast(error.message || 'The saved obfuscated version could not be downloaded');
+      return false;
+    }
+  };
+
   const exportCopy = () => {
+    if (activeFile.isProjectDocument) {
+      if (!reviewableProjectDocument) {
+        setToast('Choose the saved original version before creating another obfuscated copy.');
+        return;
+      }
+      void previewProjectExport();
+      return;
+    }
     if (currentProject) {
-      setToast('Export is not yet connected to saved project documents. No project files were changed.');
+      setToast('Select a saved project document to create an immutable obfuscated version.');
       return;
     }
     const used = new Set([...activeText.matchAll(/\[\[T_(\d+)\]\]/g)].map((match) => `T_${match[1]}`));
@@ -660,6 +792,9 @@ export default function App() {
       if (!response.ok) throw new Error(data.detail || 'Could not open this project');
       const savedDocuments = (data.documents || []).map((document) => ({
         id: document.id,
+        versionId: document.versionId,
+        versions: document.versions || [],
+        selectedVersionId: document.versionId,
         name: document.name,
         type: document.type,
         status: 'Saved original · v01',
@@ -669,11 +804,12 @@ export default function App() {
         isProjectDocument: true,
       }));
       setCurrentProject(data);
-      setFiles([...savedDocuments, ...initialFiles]);
-      setActiveName(savedDocuments[0]?.id || initialFiles[0].name);
+      setFiles(savedDocuments);
+      setActiveName(savedDocuments[0]?.id || '');
       setSectionIndex(0);
       setDenseText(false);
       setProjectModalOpen(false);
+      setExportPreview(null);
       if (savedDocuments[0]) await loadProjectDocumentPreview(savedDocuments[0].id);
       setToast(`${projectAction === 'create' ? 'Created' : 'Opened'} local project “${data.name}”`);
     } catch (error) {
@@ -706,11 +842,8 @@ export default function App() {
         });
         const updated = await response.json();
         if (!response.ok) throw new Error(updated.detail || 'Could not undo this decision');
-        setFiles((current) => current.map((file) => (
-          file.id === activeFile.id
-            ? { ...file, candidates: file.candidates.map((item) => item.id === updated.id ? updated : item) }
-            : file
-        )));
+        setExportPreview(null);
+        await loadProjectDocumentCandidates(activeFile.id);
         setToast('Last candidate decision undone');
         setUndo(null);
       } catch (error) {
@@ -725,6 +858,7 @@ export default function App() {
   };
 
   const switchFile = (file) => {
+    setExportPreview(null);
     setActiveName(file.id || file.name);
     setSectionIndex(0);
     setDenseText(false);
@@ -739,10 +873,11 @@ export default function App() {
     setMergeGroupIds([]);
     setManualPhrase('');
     setToast(`Opened ${file.name} · original remains unchanged`);
+    const selectedVersion = file.versions?.find((version) => version.id === file.selectedVersionId);
     if (file.isProjectDocument && !file.previewLoaded && !file.previewLoading) {
-      void loadProjectDocumentPreview(file.id);
+      void loadProjectDocumentPreview(file.id, file.selectedVersionId, selectedVersion?.kind);
     }
-    if (file.isProjectDocument && file.previewLoaded && !file.candidateLoaded && !file.candidateLoading) {
+    if (file.isProjectDocument && (selectedVersion?.kind || 'original') === 'original' && file.previewLoaded && !file.candidateLoaded && !file.candidateLoading) {
       void loadProjectDocumentCandidates(file.id);
     }
   };
@@ -756,18 +891,19 @@ export default function App() {
         <div className="side-spacer" /><div className="local-badge"><span className="status-dot" style={{ background: serviceAvailable ? 'var(--success)' : 'var(--warn)' }} /><span><strong style={{ color: 'var(--accent-on)' }}>{serviceAvailable ? 'Local service ready' : 'UI preview mode'}</strong><br />{serviceAvailable ? 'Document content stays on this computer.' : 'Start FastAPI for local projects.'}</span></div>
       </aside>
       <main className="main">
-        <header className="topbar"><div className="crumbs"><span>{currentProject?.name || 'Cedar briefing · demo'}</span><span>/</span><strong>{activeFile.name}</strong></div><div className="top-actions"><button className="text-btn" onClick={() => setToast('Encrypted backup is planned for release hardening')}>Encrypted backup</button><button className="icon-btn" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀' : '☾'}</button><button className="icon-btn" aria-label="Open local settings" onClick={() => setToast('Local settings are available in the service configuration')}>•••</button><button className="primary-btn" disabled={currentProject && projectBusy} onClick={() => currentProject ? importProjectDocuments() : setModalOpen(true)}>{projectBusy ? 'Working…' : 'Import file'}</button></div></header>
-        <div className="workspace">
-          <div className="page-head"><div><p className="eyebrow">{activeFile.isProjectDocument ? (activeFile.previewError ? 'Saved original · preview unavailable' : 'Local parsed preview') : 'Document review · version 03'}</p><h1>{activeFile.isProjectDocument ? (activeFile.previewError ? 'Preview unavailable' : 'Document review') : 'Prepare a safe copy'}</h1><p className="subhead">{activeFile.isProjectDocument ? (activeFile.previewError ? 'This original remains saved and unchanged. The local adapter could not parse this document.' : 'Candidates are local suggestions. Review each decision; the saved original remains unchanged.') : 'Review suggested terms before this editable-text document leaves your computer. Similarity is a prompt, never a decision.'}</p></div><button className="primary-btn" onClick={exportCopy}>Export obfuscated copy</button></div>
+        <header className="topbar"><div className="crumbs"><span>{currentProject?.name || 'Cedar briefing · demo'}</span><span>/</span><strong>{projectHasNoDocuments ? 'No documents' : activeFile.name}</strong></div><div className="top-actions"><button className="text-btn" onClick={() => setToast('Encrypted backup is planned for release hardening')}>Encrypted backup</button><button className="icon-btn" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀' : '☾'}</button><button className="icon-btn" aria-label="Open local settings" onClick={() => setToast('Local settings are available in the service configuration')}>•••</button><button className="primary-btn" disabled={currentProject && projectBusy} onClick={() => currentProject ? importProjectDocuments() : setModalOpen(true)}>{projectBusy ? 'Working…' : 'Import file'}</button></div></header>
+        <div className="workspace" data-empty-project={projectHasNoDocuments ? 'true' : undefined}>
+          {projectHasNoDocuments && <section className="panel empty-project-message"><span className="eyebrow">LOCAL PROJECT · READY</span><h1>Add a document to begin</h1><p>Choose a local document to review its supported editable text. Originals stay unchanged; exports are saved as separate project versions.</p><button className="primary-btn" type="button" onClick={importProjectDocuments} disabled={projectBusy}>{projectBusy ? 'Working…' : 'Import documents'}</button></section>}
+          <div className="page-head"><div><p className="eyebrow">{activeFile.isProjectDocument ? (activeFile.previewError ? 'Saved original · preview unavailable' : `${activeVersion.kind === 'original' ? 'Original' : 'Obfuscated version'} · local parsed preview`) : 'Document review · version 03'}</p><h1>{activeFile.isProjectDocument ? (activeFile.previewError ? 'Preview unavailable' : 'Document review') : 'Prepare a safe copy'}</h1><p className="subhead">{activeFile.isProjectDocument ? (activeFile.previewError ? 'This saved version could not be parsed. The original remains unchanged.' : 'Review candidate decisions in supported editable text. Project versions remain local.') : 'Review suggested terms before this editable-text document leaves your computer. Similarity is a prompt, never a decision.'}</p></div><button className="primary-btn" disabled={!reviewableProjectDocument || exportBusy} onClick={exportCopy}>{exportBusy ? 'Preparing…' : 'Preview & export obfuscated copy'}</button></div>
           <section className="layout">
-            <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${files.filter((file) => file.isProjectDocument).length} saved` : `${files.length} items`}</span></div><div className="file-list">{files.map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span><span className="file-name">{file.name}</span><span className="file-status">{file.isProjectDocument ? file.status : currentProject ? 'Synthetic sample · not saved' : file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : file.status.includes('Restore') ? '↗' : ''}</span></button>)}</div></aside>
+            <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${projectDocuments.length} saved` : `${files.length} items`}</span></div><div className="file-list">{(currentProject ? projectDocuments : files).map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span><span className="file-name">{file.name}</span><span className="file-status">{file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : ''}</span></button>)}{currentProject && projectDocuments.length === 0 && <p className="empty-file-list">No project documents yet.</p>}</div></aside>
             <section className="panel review-panel">
-              <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? (activeFile.previewError ? 'Saved original · not parsed or modified' : 'Local preview · saved original unchanged') : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div>
-              <div className="slider-area"><div className="slider-labels"><label htmlFor="sensitivity">Candidate breadth</label><span className="slider-value">Level {level} / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value={level} aria-valuetext={`Level ${level} of 10 candidate breadth`} onChange={(event) => setLevel(Number(event.target.value))} /><div className="range-notes"><span>Narrow · fewer candidate types</span><span>All detected candidates</span></div></div>
+              <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? `${activeVersion.kind === 'original' ? 'Saved original' : 'Obfuscated copy'} · local preview` : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="review-toolbar-actions">{activeFile.isProjectDocument && <label className="version-select">Version<select aria-label="Select document version" value={activeFile.selectedVersionId || activeFile.versionId} onChange={(event) => selectProjectVersion(event.target.value)}>{(activeFile.versions || []).map((version) => <option key={version.id} value={version.id}>{version.kind === 'original' ? 'Original' : 'Obfuscated'} · {version.name}</option>)}</select></label>}<div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div></div>
+              {reviewableProjectDocument && <div className="slider-area"><div className="slider-labels"><label htmlFor="sensitivity">Candidate breadth</label><span className="slider-value">Level {level} / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value={level} aria-valuetext={`Level ${level} of 10 candidate breadth`} onChange={(event) => { setExportPreview(null); setLevel(Number(event.target.value)); }} /><div className="range-notes"><span>Narrow · fewer candidate types</span><span>All detected candidates</span></div></div>}
               {view === 'preview' ? <div className="preview"><div className="preview-note"><span className="status-dot" /><span>{activeFile.isProjectDocument ? (activeFile.candidateLoading ? 'Scanning supported editable text locally…' : `${visibleCandidates.length} candidates shown at level ${level}. Review decisions below; only supported editable text is scanned.`) : `${visibleGroups.length} suggested groups are visible at this level. Click a highlighted term to decide.`}</span></div><article className="doc-page"><div className="doc-kicker">BOARD UPDATE · 04 OCTOBER 2026</div><h2>{activeFile.heading}</h2>{activeFile.content.map((paragraph, index) => <p key={`${activeFile.name}-${index}`}>{renderParagraph(paragraph)}</p>)}<div className="legend"><span className="legend-item"><span className="legend-swatch" />Suggested</span><span className="legend-item"><span className="legend-swatch manual" />Manual decision</span><span className="legend-item">Click a term to inspect its group</span></div></article><div className="preview-foot"><span><strong>{activeFile.isProjectDocument ? visibleCandidates.reduce((sum, candidate) => sum + (candidate.decision === 'excluded' ? 0 : candidate.occurrenceCount), 0) : matchCount}</strong> included or suggested occurrences at level <strong>{level}</strong></span><span>Original stays unchanged</span></div>{undo?.file === activeName && <button className="small-btn undo-button" onClick={undoDecision}>Undo last decision</button>}</div> : <div className="preview changes-pane"><div className="preview-note"><span className="status-dot" /><span>Export diff for version 03</span></div><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr style={{ color: 'var(--muted)', font: '11px var(--font-mono)', textAlign: 'left' }}><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>OCCURRENCE</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>REPLACEMENT</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>DECISION</th></tr></thead><tbody>{changeRows.map(({ group, occurrences, decision }) => <tr key={group.id}><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{group.term} · {occurrences} {occurrences === 1 ? 'match' : 'matches'}</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>[[{group.token}]]</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{decision === 'excluded' ? 'Excluded' : decision === 'included' ? 'Included' : 'Suggested'}</td></tr>)}</tbody></table></div>}
             </section>
             <aside className="right-stack">
-              {activeFile.isProjectDocument ? <section className="panel candidate-panel">
+              {reviewableProjectDocument ? <section className="panel candidate-panel">
                 <div className="panel-head"><span className="panel-title">Candidate review</span><span className="panel-meta">{visibleCandidates.length} shown</span></div>
                 <div className="ner-model-panel" aria-label="High-recall local NER model">
                   <div className="ner-model-heading"><strong>High-recall local NER</strong><span role="status" aria-live="polite">{nerModelStatus?.installed ? (nerModelStatus.runtimeAvailable ? 'Installed · offline ready' : 'Model installed · runtime setup needed') : nerModelStatus?.status === 'downloading' ? 'Downloading model…' : 'Not downloaded · patterns remain active'}</span></div>
@@ -824,7 +960,7 @@ export default function App() {
                 </div>
                 {proposals.length > 0 && <div className="candidate-subsection"><div className="candidate-subhead">Similarity proposals · confirm before grouping</div>{proposals.slice(0, 50).map((proposal) => <div className="proposal-row" key={proposal.id}><div><strong>{candidatesById[proposal.sourceId].term} ↔ {candidatesById[proposal.targetId].term}</strong><span>{proposal.reason}</span></div><button className="small-btn" onClick={() => applyCandidateGroupOperation('add', [proposal.sourceId, proposal.targetId])}>Confirm group</button></div>)}</div>}
                 {candidateGroups.length > 0 && <div className="candidate-subsection"><div className="candidate-subhead">Confirmed groups</div>{candidateGroups.map((group) => <div className="confirmed-group" key={group.id}><label><input type="checkbox" checked={mergeGroupIds.includes(group.id)} onChange={(event) => setMergeGroupIds((current) => event.target.checked ? [...current, group.id] : current.filter((id) => id !== group.id))} /> Merge group</label>{group.candidateIds.map((candidateId) => <div className="confirmed-member" key={candidateId}><span>{candidatesById[candidateId]?.term || 'Candidate'}</span><div>{group.candidateIds.length > 1 && <button className="small-btn" onClick={() => applyCandidateGroupOperation('split', [candidateId], group.id)}>Split out</button>}<button className="small-btn" onClick={() => applyCandidateGroupOperation('remove', [candidateId], group.id)}>Remove</button></div></div>)}</div>)}<button className="small-btn" disabled={mergeGroupIds.length < 2} onClick={() => applyCandidateGroupOperation('merge', [], undefined, mergeGroupIds)}>Merge selected groups</button></div>}
-              </section> : <section className="panel"><div className="panel-head"><span className="panel-title">Suggested groups</span><span className="panel-meta">{visibleGroups.length} groups</span></div><div className="graph-list">{visibleGroups.length ? visibleGroups.map((group) => <div key={group.id} className={`graph-card ${selectedGroup === group.id ? 'selected' : ''}`} onClick={() => setSelectedGroup(group.id)}><div className="graph-card-head"><span className="graph-term">{group.term}</span><span className="confidence">{group.confidence} match</span></div><p className="graph-reason">{group.reason}</p><div className="member-row">{group.members.map((member, index) => <span key={member} className={`member ${confirmed[group.id] || (index === 0 && group.id === 'alex') ? 'confirmed' : ''}`}>{member} · {countMatches(activeText, member)}</span>)}</div><div className="graph-actions"><button className="small-btn primary" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'included'); }}>{decisions[group.id] === 'included' ? 'Included' : 'Include group'}</button><button className="small-btn" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'excluded'); }}>Exclude</button></div></div>) : <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>No detected groups at this level.</p>}</div></section>}
+              </section> : <section className="panel"><div className="panel-head"><span className="panel-title">{activeFile.isProjectDocument ? 'Exported version' : 'Suggested groups'}</span><span className="panel-meta">{activeFile.isProjectDocument ? 'Read only' : `${visibleGroups.length} groups`}</span></div><div className="graph-list">{activeFile.isProjectDocument ? <><p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>This obfuscated version is read-only. Select Original above to review or adjust its candidate decisions.</p><button className="small-btn" type="button" onClick={() => downloadProjectVersion(activeVersion.id, activeVersion.name)}>Download this version</button><label className="dense-toggle"><input type="checkbox" checked={denseText} onChange={(event) => setDenseText(event.target.checked)} /> Dense text view</label>{previewSections.length > 1 && <div className="preview-navigation" role="group" aria-label="Preview section navigation" aria-describedby="preview-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}><span className="sr-only" id="preview-navigation-help">Use Left or Right Arrow to move between sections, or Home and End to jump to the first and last sections.</span><button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex - 1)} disabled={sectionIndex <= 0} aria-label="Previous preview section">Previous</button><span aria-live="polite"><strong>Section {sectionIndex + 1} of {previewSections.length}</strong><small>{activeSection?.label}</small></span><button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex + 1)} disabled={sectionIndex >= previewSections.length - 1} aria-label="Next preview section">Next</button></div>}</> : visibleGroups.length ? visibleGroups.map((group) => <div key={group.id} className={`graph-card ${selectedGroup === group.id ? 'selected' : ''}`} onClick={() => setSelectedGroup(group.id)}><div className="graph-card-head"><span className="graph-term">{group.term}</span><span className="confidence">{group.confidence} match</span></div><p className="graph-reason">{group.reason}</p><div className="member-row">{group.members.map((member, index) => <span key={member} className={`member ${confirmed[group.id] || (index === 0 && group.id === 'alex') ? 'confirmed' : ''}`}>{member} · {countMatches(activeText, member)}</span>)}</div><div className="graph-actions"><button className="small-btn primary" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'included'); }}>{decisions[group.id] === 'included' ? 'Included' : 'Include group'}</button><button className="small-btn" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'excluded'); }}>Exclude</button></div></div>) : <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>No detected groups at this level.</p>}</div></section>}
               {activeFile.isProjectDocument && <section className="panel coverage-panel" aria-labelledby="coverage-title">
                 <div className="panel-head"><span id="coverage-title" className="panel-title">Coverage and limits</span><span className="panel-meta">{activeFile.previewFormat || activeFile.type}</span></div>
                 <div className={`coverage-alert ${unsupportedPartCount || previewWarnings.length ? 'has-warning' : ''}`} role={unsupportedPartCount || previewWarnings.length ? 'alert' : 'status'}>
@@ -857,6 +993,7 @@ export default function App() {
           </section>
         </div>
       </main>
+      {exportPreview && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !exportBusy) setExportPreview(null); }}><section className="modal export-preview-modal" role="dialog" aria-modal="true" aria-labelledby="export-preview-title" aria-describedby="export-preview-description"><h2 id="export-preview-title">Review obfuscated copy</h2><p id="export-preview-description">{exportPreview.outputName} · {exportPreview.matchCount} supported-text occurrences will change. This preview does not modify the original.</p><div className="export-preview-content"><h3>Selected replacements</h3><ul className="export-match-list">{exportPreview.matches.map((match) => <li key={match.candidateId}><span><strong>{match.term}</strong> · {match.occurrenceCount} {match.occurrenceCount === 1 ? 'match' : 'matches'}</span><code>{match.token}</code></li>)}</ul><h3>Output preview · {exportPreview.format}</h3><pre>{exportPreviewText || 'No supported text is present in this preview.'}</pre><h3>Coverage and warnings</h3>{exportPreview.warnings.length ? <ul className="export-warning-list">{exportPreview.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul> : <p>No adapter warnings were reported. This is not a guarantee that all sensitive information was found.</p>}<p>Only adapter-supported editable text is processed. Images/OCR, metadata, macros, embedded binary content, and unhandled text surfaces are not sanitized. The private replacement map remains encrypted in this project and is not included in the output file.</p></div>{exportPreview.requiresAcknowledgement && <label className="export-warning-ack"><input type="checkbox" checked={exportAcknowledged} onChange={(event) => setExportAcknowledged(event.target.checked)} /><span>I reviewed the coverage and placeholder warnings and understand unsupported or unrecognized content may remain.</span></label>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setExportPreview(null)} disabled={exportBusy}>Cancel</button><button className="primary-btn" type="button" onClick={approveProjectExport} disabled={exportBusy || (exportPreview.requiresAcknowledgement && !exportAcknowledged)}>{exportBusy ? 'Saving version…' : 'Approve and save new version'}</button></div></section></div>}
       {toast && <div className="toast show" role="status" aria-live="polite">{toast}</div>}
       {modalOpen && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget) setModalOpen(false); }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">Import into Cedar briefing</h2><p>Files stay on this computer. This browser preview reads TXT, MD, and CSV. Office text extraction requires the local document engine.</p><label className="drop-zone"><strong>Choose a local file</strong><span>Up to 100 MB · no upload or cloud connection</span><input type="file" accept=".txt,.md,.csv,text/plain,text/csv" onChange={handleImport} aria-label="Choose a local text file" /></label><div className="modal-actions"><button className="text-btn" onClick={() => setModalOpen(false)}>Cancel</button></div></div></div>}
       {projectModalOpen && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !projectBusy) setProjectModalOpen(false); }}><form className="modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title" onSubmit={submitProject}><h2 id="project-modal-title">Local project folder</h2><p>Create a new workspace or open an existing Blot project. The folder and encrypted project state stay on this computer.</p><div className="view-switch" role="tablist" aria-label="Project action"><button type="button" className={projectAction === 'create' ? 'active' : ''} role="tab" aria-selected={projectAction === 'create'} onClick={() => setProjectAction('create')}>Create</button><button type="button" className={projectAction === 'open' ? 'active' : ''} role="tab" aria-selected={projectAction === 'open'} onClick={() => setProjectAction('open')}>Open existing</button></div>{projectAction === 'create' && <label className="project-field">Project name<input value={projectName} onChange={(event) => setProjectName(event.target.value)} required maxLength={100} autoFocus /></label>}<label className="project-field">Project folder<input value={projectDirectory} onChange={(event) => setProjectDirectory(event.target.value)} required placeholder="Choose a local folder" /></label><button className="text-btn" type="button" onClick={chooseProjectDirectory} disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : 'Browse on this computer'}</button>{!serviceAvailable && <p role="status">Start FastAPI to create or open a local project.</p>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setProjectModalOpen(false)} disabled={projectBusy}>Cancel</button><button className="primary-btn" type="submit" disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : projectAction === 'create' ? 'Create project' : 'Open project'}</button></div></form></div>}

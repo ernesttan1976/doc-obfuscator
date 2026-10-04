@@ -529,6 +529,179 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
 
 
 @pytest.mark.anyio
+async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immutable_version(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "brief.md"
+    root.mkdir()
+    source.write_bytes(b"Alex Tan contact alex@example.test. Existing [[T_123]] remains.")
+    original_bytes = source.read_bytes()
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        headers = {"X-Local-App-Token": app.state.local_token}
+        await client.post("/api/projects", json={"name": "Project", "directory": str(root)}, headers=headers)
+        imported = await client.post(
+            "/api/projects/documents",
+            json={"directory": str(root), "files": [str(source)]},
+            headers=headers,
+        )
+        document = imported.json()["documents"][0]
+        request = {"directory": str(root), "document_id": document["id"]}
+        analysis = await client.post(
+            "/api/projects/document-candidates",
+            json={**request, "manual_terms": ["Alex Tan"]},
+            headers=headers,
+        )
+        email = next(item for item in analysis.json()["candidates"] if item["category"] == "EMAIL")
+        await client.post(
+            "/api/projects/candidate-decision",
+            json={**request, "candidate_id": email["id"], "decision": "excluded"},
+            headers=headers,
+        )
+        denied = await client.post("/api/projects/export-preview", json={**request, "level": 1})
+        preview_response = await client.post(
+            "/api/projects/export-preview",
+            json={**request, "level": 1},
+            headers=headers,
+        )
+        preview = preview_response.json()
+        unacknowledged = await client.post(
+            "/api/projects/export",
+            json={**request, "plan_id": preview["planId"]},
+            headers=headers,
+        )
+        exported = await client.post(
+            "/api/projects/export",
+            json={**request, "plan_id": preview["planId"], "acknowledge_warnings": True},
+            headers=headers,
+        )
+        downloaded = await client.post(
+            "/api/projects/document-version-download",
+            json={**request, "version_id": exported.json()["id"]},
+            headers=headers,
+        )
+        version_preview = await client.post(
+            "/api/projects/document-preview",
+            json={**request, "version_id": exported.json()["id"]},
+            headers=headers,
+        )
+        reopened = await client.post(
+            "/api/projects/open",
+            json={"directory": str(root)},
+            headers=headers,
+        )
+
+    assert denied.status_code == 401
+    assert preview_response.status_code == 200
+    assert preview["requiresAcknowledgement"] is True
+    assert preview["preexistingPlaceholderCount"] == 1
+    assert len(preview["matches"]) == 1
+    assert preview["matches"][0]["term"] == "Alex Tan"
+    assert preview["preview"]["text"].startswith("[[T_")
+    assert unacknowledged.status_code == 409
+    assert exported.status_code == 200
+    version = exported.json()
+    assert version["kind"] == "obfuscated"
+    assert version["parentVersionId"] == document["versionId"]
+    assert downloaded.status_code == 200
+    assert version_preview.status_code == 200
+    assert version_preview.json()["text"].startswith("[[T_")
+    reopened_document = reopened.json()["documents"][0]
+    assert any(version["id"] == exported.json()["id"] for version in reopened_document["versions"])
+    assert b"Alex Tan" not in downloaded.content
+    assert b"alex@example.test" in downloaded.content
+    assert b"[[T_123]]" in downloaded.content
+    assert source.read_bytes() == original_bytes
+    stored_original = root / ".blot" / "originals" / document["id"] / "original.md"
+    assert stored_original.read_bytes() == original_bytes
+    assert (root / ".blot" / "outputs" / document["id"] / f"{version['id']}.md").read_bytes() == downloaded.content
+    encrypted_state = (root / ".blot" / "private-state.enc").read_bytes()
+    assert b"Alex Tan" not in encrypted_state
+    assert b"alex@example.test" not in encrypted_state
+    persisted_versions = app.state.project_service.list_documents(root)[0].versions
+    assert any(item["id"] == version["id"] for item in persisted_versions)
+
+
+@pytest.mark.anyio
+async def test_export_plan_is_invalidated_when_candidate_decisions_change(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "brief.txt"
+    root.mkdir()
+    source.write_text("Alex Tan is listed here.", encoding="utf-8")
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        headers = {"X-Local-App-Token": app.state.local_token}
+        await client.post("/api/projects", json={"name": "Project", "directory": str(root)}, headers=headers)
+        imported = await client.post(
+            "/api/projects/documents",
+            json={"directory": str(root), "files": [str(source)]},
+            headers=headers,
+        )
+        request = {
+            "directory": str(root),
+            "document_id": imported.json()["documents"][0]["id"],
+        }
+        analysis = await client.post(
+            "/api/projects/document-candidates",
+            json={**request, "manual_terms": ["Alex Tan"]},
+            headers=headers,
+        )
+        preview = await client.post(
+            "/api/projects/export-preview",
+            json={**request, "level": 1},
+            headers=headers,
+        )
+        candidate = analysis.json()["candidates"][0]
+        await client.post(
+            "/api/projects/candidate-decision",
+            json={**request, "candidate_id": candidate["id"], "decision": "excluded"},
+            headers=headers,
+        )
+        stale_export = await client.post(
+            "/api/projects/export",
+            json={**request, "plan_id": preview.json()["planId"]},
+            headers=headers,
+        )
+
+    assert preview.status_code == 200
+    assert stale_export.status_code == 409
+    assert "review decisions changed" in stale_export.json()["detail"]
+    assert not (root / ".blot" / "outputs").exists()
+
+
+def test_confirmed_group_decisions_propagate_without_overriding_a_pinned_exclusion(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "brief.txt"
+    root.mkdir()
+    source.write_text("Alex Tan met Alex Tann.", encoding="utf-8")
+    service = ProjectService(MemoryKeyStore())
+    service.create(root, "Project")
+    imported = service.import_documents(root, [source])[0]
+    analysis = service.analyze_document_candidates(root, imported.document_id, ["Alex Tan"])
+    first = next(item for item in analysis["candidates"] if item["term"] == "Alex Tan")
+    second = next(item for item in analysis["candidates"] if item["term"] == "Alex Tann")
+    group = service.update_candidate_groups(
+        root,
+        imported.document_id,
+        "add",
+        [first["id"], second["id"]],
+    )[0]
+
+    service.set_candidate_decision(root, imported.document_id, second["id"], "excluded")
+    service.set_candidate_decision(root, imported.document_id, first["id"], "included")
+    after_include = service.analyze_document_candidates(root, imported.document_id)
+    included_first = next(item for item in after_include["candidates"] if item["id"] == first["id"])
+    excluded_peer = next(item for item in after_include["candidates"] if item["id"] == second["id"])
+    service.set_candidate_decision(root, imported.document_id, first["id"], "excluded")
+    after_exclude = service.analyze_document_candidates(root, imported.document_id)
+
+    assert group["candidateIds"] == [first["id"], second["id"]]
+    assert included_first["decision"] == "included"
+    assert excluded_peer["decision"] == "excluded"
+    assert excluded_peer["pinned"] is True
+    assert all(item["decision"] == "excluded" for item in after_exclude["candidates"] if item["id"] in group["candidateIds"])
+
+
+@pytest.mark.anyio
 async def test_native_folder_picker_is_token_protected_and_returns_only_user_selection(tmp_path, monkeypatch):
     selected = tmp_path / "local project"
     monkeypatch.setattr(main_module, "pick_project_directory", lambda: selected)

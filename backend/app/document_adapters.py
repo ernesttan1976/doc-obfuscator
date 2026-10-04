@@ -276,6 +276,26 @@ def serialize_with_replacements(parsed: ParsedDocument, replacements: dict[str, 
     raise DocumentAdapterError("This document format cannot be serialized safely.")
 
 
+def count_supported_occurrences(parsed: ParsedDocument, value: str) -> int:
+    """Count literal matches only in the editable text surfaces handled by this adapter."""
+    if not value:
+        return 0
+    pattern = re.compile(re.escape(value), re.IGNORECASE)
+    if parsed.format in {"TXT", "MD"}:
+        text_blocks = (parsed.text or "",)
+    elif parsed.format == "CSV":
+        text_blocks = (cell for row in parsed.rows for cell in row)
+    elif parsed.format == "XLSX":
+        text_blocks = (cell.text for sheet in parsed.sheets for cell in sheet.cells)
+    else:
+        text_blocks = (
+            paragraph
+            for _, section in parsed.preview_sections
+            for paragraph in section.splitlines()
+        )
+    return sum(sum(1 for _ in pattern.finditer(block)) for block in text_blocks)
+
+
 class _ReplacementFunction:
     def __init__(self, replacements: dict[str, str]) -> None:
         if any(not isinstance(key, str) or not key for key in replacements):
@@ -283,8 +303,14 @@ class _ReplacementFunction:
         if any(not isinstance(value, str) for value in replacements.values()):
             raise DocumentAdapterError("Replacement values must be text.")
         self.replacements = replacements
+        self.casefolded_replacements = {key.casefold(): value for key, value in replacements.items()}
+        if len(self.casefolded_replacements) != len(replacements):
+            raise DocumentAdapterError("Replacement terms cannot differ only by letter case.")
         self.pattern = (
-            re.compile("|".join(re.escape(key) for key in sorted(replacements, key=len, reverse=True)))
+            re.compile(
+                "|".join(re.escape(key) for key in sorted(replacements, key=len, reverse=True)),
+                re.IGNORECASE,
+            )
             if replacements
             else None
         )
@@ -292,13 +318,13 @@ class _ReplacementFunction:
     def __call__(self, value: str) -> str:
         if self.pattern is None:
             return value
-        return self.pattern.sub(lambda match: self.replacements[match.group(0)], value)
+        return self.pattern.sub(lambda match: self.casefolded_replacements[match.group(0).casefold()], value)
 
     def edits(self, value: str) -> list[tuple[int, int, str]]:
         if self.pattern is None:
             return []
         return [
-            (match.start(), match.end(), self.replacements[match.group(0)])
+            (match.start(), match.end(), self.casefolded_replacements[match.group(0).casefold()])
             for match in self.pattern.finditer(value)
         ]
 

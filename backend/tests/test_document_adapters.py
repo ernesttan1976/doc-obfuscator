@@ -93,6 +93,15 @@ def test_text_adapter_preserves_utf8_bom_and_mixed_line_endings():
     assert source == b"\xef\xbb\xbfAlex Tan [[T_001]]\r\nProject Cedar\n"
 
 
+def test_replacements_match_case_variants_without_changing_original_case_semantics():
+    parsed = parse_document(b"Alex Tan and ALEX TAN", ".txt")
+
+    output = serialize_with_replacements(parsed, {"Alex Tan": "[[T_random]]"})
+
+    assert output == b"[[T_random]] and [[T_random]]"
+    assert parsed.source == b"Alex Tan and ALEX TAN"
+
+
 @pytest.mark.parametrize(
     ("source", "encoding", "expected"),
     [
