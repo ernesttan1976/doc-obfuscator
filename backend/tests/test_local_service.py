@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -638,7 +639,8 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
     assert {match["term"] for match in preview["matches"]} == {"Alex Tan", "Project Cedar"}
     assert any(match["term"] == "Project Cedar" for match in broad_preview["matches"])
     assert all(match["term"] != "alex@example.test" for match in preview["matches"])
-    assert preview["preview"]["text"].startswith("[[T_")
+    generated_tokens = re.findall(r"\[\[T_[0-9a-f]{6}\]\]", preview["preview"]["text"])
+    assert len(generated_tokens) == 2
     assert unacknowledged.status_code == 409
     assert exported.status_code == 200
     version = exported.json()

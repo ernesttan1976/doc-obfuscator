@@ -956,7 +956,7 @@ class ProjectService:
     @staticmethod
     def _new_placeholder(existing: set[str]) -> str:
         for _ in range(20):
-            token = f"[[T_{secrets.token_hex(16)}]]"
+            token = f"[[T_{secrets.token_hex(3)}]]"
             if token.casefold() not in existing:
                 return token
         raise ProjectError("A collision-resistant placeholder could not be allocated; review the document and retry.")
