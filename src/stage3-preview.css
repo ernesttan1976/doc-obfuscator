@@ -358,6 +358,18 @@
   border-bottom: 1px solid var(--border-soft);
 }
 
+.right-stack .preview-navigation {
+  display: none;
+}
+
+.preview-navigation-main {
+  width: min(100%, 520px);
+  margin: 0 auto 18px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
 .preview-navigation .small-btn {
   flex: 0 0 auto;
   padding: 0 8px;
