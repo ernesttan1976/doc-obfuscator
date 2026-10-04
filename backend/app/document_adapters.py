@@ -23,6 +23,7 @@ MAX_ARCHIVE_MEMBERS = 10_000
 MAX_PREVIEW_CHARACTERS = 12_000
 MAX_PREVIEW_CELLS = 2_000
 MAX_PREVIEW_SHEETS = 100
+MAX_PREVIEW_SECTIONS = 100
 PLACEHOLDER_LIKE_TEXT = re.compile(r"\[\[T_[A-Za-z0-9_-]{3,}\]\]", re.IGNORECASE)
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -89,6 +90,7 @@ class ParsedDocument:
     text: str | None = None
     rows: tuple[tuple[str, ...], ...] = ()
     sheets: tuple[WorksheetContent, ...] = ()
+    preview_sections: tuple[tuple[str, str], ...] = ()
     warnings: tuple[str, ...] = ()
     examined_xml_part_count: int = 0
     examined_parts: tuple[str, ...] = ()
@@ -132,6 +134,19 @@ class ParsedDocument:
             assert self.text is not None
             result["text"] = self.text[:MAX_PREVIEW_CHARACTERS]
             result["truncated"] = len(self.text) > MAX_PREVIEW_CHARACTERS
+            sections = []
+            remaining = MAX_PREVIEW_CHARACTERS
+            sections_truncated = len(self.preview_sections) > MAX_PREVIEW_SECTIONS
+            for part_name, section_text in self.preview_sections[:MAX_PREVIEW_SECTIONS]:
+                if remaining <= 0:
+                    sections_truncated = True
+                    break
+                clipped = section_text[:remaining]
+                sections.append({"part": part_name[:MAX_COVERAGE_PART_NAME_LENGTH], "text": clipped})
+                remaining -= len(clipped)
+                sections_truncated = sections_truncated or len(clipped) < len(section_text)
+            result["previewSections"] = sections
+            result["previewSectionsTruncated"] = sections_truncated
             result["coverage"] = {
                 "examinedXmlPartCount": self.examined_xml_part_count,
                 "examinedXmlParts": _bounded_part_names(self.examined_parts),
@@ -575,6 +590,7 @@ def _parse_office_document(data: bytes, extension: str) -> ParsedDocument:
             if "[Content_Types].xml" not in names or main_part not in names:
                 raise DocumentAdapterError(f"The {label} package is missing its main document part.")
             paragraph_groups: list[str] = []
+            preview_sections: list[tuple[str, str]] = []
             text_parts: list[str] = []
             unsupported_parts: set[str] = set()
             xml_parts = [info.filename for info in archive.infolist() if info.filename.lower().endswith(".xml")]
@@ -587,6 +603,7 @@ def _parse_office_document(data: bytes, extension: str) -> ParsedDocument:
                 if part_text:
                     paragraph_groups.extend(part_text)
                     text_parts.append(part_name)
+                    preview_sections.append((part_name, "\n".join(part_text)))
                 if _office_part_has_unhandled_text(root, supported_nodes, part_name):
                     unsupported_parts.add(part_name)
 
@@ -621,6 +638,7 @@ def _parse_office_document(data: bytes, extension: str) -> ParsedDocument:
                 encoding="xml-utf-8",
                 source=data,
                 text=text,
+                preview_sections=tuple(preview_sections),
                 warnings=tuple(warnings),
                 examined_xml_part_count=len(xml_parts),
                 examined_parts=tuple(xml_parts),

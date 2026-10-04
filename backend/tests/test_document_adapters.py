@@ -6,6 +6,7 @@ from defusedxml import ElementTree as SafeET
 
 from backend.app.document_adapters import (
     DocumentAdapterError,
+    ParsedDocument,
     parse_document,
     serialize_with_replacements,
 )
@@ -238,6 +239,10 @@ def test_docx_adapter_scans_parts_replaces_split_and_repeated_text_and_preserves
     assert preview["format"] == "DOCX"
     assert parsed.text == "Alex Tan\nProject Cedar\nAlex Tan\nAlex Tan\nAlex Tan"
     assert preview["existingPlaceholderLikeTextCount"] == 0
+    preview_sections = {section["part"]: section["text"] for section in preview["previewSections"]}
+    assert preview_sections["word/document.xml"] == "Alex Tan\nProject Cedar\nAlex Tan"
+    assert preview_sections["word/header1.xml"] == "Alex Tan"
+    assert preview["previewSectionsTruncated"] is False
     assert preview["coverage"]["examinedXmlPartCount"] == 6
     assert "word/document.xml" in preview["coverage"]["examinedXmlParts"]
     assert "word/media/picture.bin" in preview["coverage"]["skippedParts"]
@@ -291,10 +296,31 @@ def test_pptx_adapter_scans_slide_and_notes_and_keeps_untouched_parts_byte_ident
     output = serialize_with_replacements(parsed, {"Project Cedar": "[[T_002]]", "Alex Tan": "[[T_001]]"})
     preview = parse_document(output, ".pptx").to_public_dict()
     assert preview["text"] == "[[T_002]]\n[[T_002]]\n[[T_001]]"
+    preview_sections = {section["part"]: section["text"] for section in preview["previewSections"]}
+    assert preview_sections["ppt/slides/slide1.xml"] == "[[T_002]]\n[[T_002]]"
+    assert preview_sections["ppt/notesSlides/notesSlide1.xml"] == "[[T_001]]"
     assert any("external relationship targets" in warning for warning in preview["warnings"])
     assert "ppt/slides/_rels/slide1.xml.rels" in preview["coverage"]["skippedParts"]
     assert read_xlsx_part(output, "ppt/slides/_rels/slide1.xml.rels") == original_parts["ppt/slides/_rels/slide1.xml.rels"]
     assert read_xlsx_part(output, "ppt/media/picture.bin") == original_parts["ppt/media/picture.bin"]
+
+
+def test_office_preview_sections_stay_within_character_and_section_bounds():
+    parsed = ParsedDocument(
+        format="DOCX",
+        encoding="xml-utf-8",
+        source=b"",
+        text="x" * 12_001,
+        preview_sections=tuple((f"word/part{index}.xml", "x" * 200) for index in range(101)),
+    )
+
+    preview = parsed.to_public_dict()
+
+    assert len(preview["text"]) == 12_000
+    assert preview["truncated"] is True
+    assert len(preview["previewSections"]) == 60
+    assert sum(len(section["text"]) for section in preview["previewSections"]) == 12_000
+    assert preview["previewSectionsTruncated"] is True
 
 
 @pytest.mark.parametrize("extension", [".docx", ".pptx"])

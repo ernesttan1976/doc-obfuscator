@@ -362,6 +362,9 @@ async def test_document_preview_is_token_protected_and_returns_parsed_content(tm
     assert office_preview.status_code == 200
     assert office_preview.json()["format"] == "DOCX"
     assert office_preview.json()["text"] == "Office preview content"
+    assert office_preview.json()["previewSections"] == [
+        {"part": "word/document.xml", "text": "Office preview content"}
+    ]
 
 
 @pytest.mark.anyio

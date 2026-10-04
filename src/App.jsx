@@ -66,23 +66,7 @@ const previewLines = (preview) => {
     : preview.format === 'CSV'
       ? preview.rows.some((row) => row.some((cell) => cell.text.length > 0))
       : preview.sheets.some((sheet) => sheet.cells.length > 0);
-  const csvDialect = preview.dialect ? ` · delimiter ${JSON.stringify(preview.dialect.delimiter)}` : '';
-  const lineEndings = preview.lineEndings ? ` · ${preview.lineEndings}` : '';
-  const metadata = [`Parsed ${preview.format} · ${preview.encoding}${lineEndings}${csvDialect}`];
-  if (preview.truncated) metadata.push('Preview is truncated; the saved original remains complete.');
-  if (preview.existingPlaceholderLikeTextCount) {
-    metadata.push(`Existing placeholder-like strings: ${preview.existingPlaceholderLikeTextCount}. Review before processing.`);
-  }
-  metadata.push(...preview.warnings.map((warning) => `Coverage warning: ${warning}`));
-  const coverage = preview.coverage ? [
-    `Coverage inventory · ${preview.coverage.examinedXmlPartCount} XML parts examined · ${preview.coverage.textPartCount} text-bearing parts · ${preview.coverage.skippedPartCount} non-XML parts skipped · ${preview.coverage.unsupportedPartCount} unsupported parts detected`,
-    ...preview.coverage.examinedXmlParts.map((part) => `Examined XML part: ${part}`),
-    ...preview.coverage.textParts.map((part) => `Text-bearing part: ${part}`),
-    ...preview.coverage.skippedParts.map((part) => `Skipped package part: ${part}`),
-    ...preview.coverage.unsupportedParts.map((part) => `Unsupported package part: ${part}`),
-    ...(preview.coverage.partNamesTruncated ? ['Coverage inventory is truncated; see adapter limits before processing.'] : []),
-  ] : [];
-  return [...metadata, ...coverage, ...(hasText ? content : ['No supported literal text was found.'])];
+  return hasText ? content : ['No supported literal text was found.'];
 };
 
 function makeToken(used) {
@@ -108,6 +92,8 @@ export default function App() {
   const [confirmationSets, setConfirmationSets] = useState({});
   const [selectedGroup, setSelectedGroup] = useState('alex');
   const [view, setView] = useState('preview');
+  const [denseText, setDenseText] = useState(false);
+  const [sectionIndex, setSectionIndex] = useState(0);
   const [theme, setTheme] = useState(() => localStorage.getItem('blot-theme') === 'dark' ? 'dark' : 'light');
   const [modalOpen, setModalOpen] = useState(false);
   const [projectModalOpen, setProjectModalOpen] = useState(false);
@@ -126,6 +112,8 @@ export default function App() {
 
   const activeFile = files.find((file) => (file.id || file.name) === activeName) || files[0];
   const activeText = activeFile.rawText ?? activeFile.content.join(activeFile.lineEnding || '\n');
+  const previewSections = activeFile.previewSections || [];
+  const activeSection = previewSections[sectionIndex];
   const decisions = decisionSets[activeName] || { alex: 'suggested', cedar: 'suggested' };
   const confirmed = confirmationSets[activeName] || { alex: true, cedar: false };
   const getActiveMembers = (group) => confirmed[group.id] ? group.members : group.members.slice(0, 1);
@@ -149,6 +137,14 @@ export default function App() {
       group.candidateIds.includes(proposal.sourceId) && group.candidateIds.includes(proposal.targetId)
     ))
   ));
+  const candidateDecisionCounts = candidates.reduce((counts, candidate) => {
+    counts[candidate.decision] = (counts[candidate.decision] || 0) + 1;
+    return counts;
+  }, { suggested: 0, included: 0, excluded: 0 });
+  const belowLevelCount = candidates.filter((candidate) => candidate.level > level && candidate.decision === 'suggested').length;
+  const previewCoverage = activeFile.previewCoverage;
+  const previewWarnings = activeFile.previewWarnings || [];
+  const unsupportedPartCount = previewCoverage?.unsupportedPartCount || 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -281,15 +277,28 @@ export default function App() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not parse this document for preview');
       const content = previewLines(data);
+      const previewSections = (data.previewSections || []).map((section) => {
+        const slideMatch = data.format === 'PPTX' && section.part.match(/(?:^|\/)slide(\d+)\.xml$/i);
+        return {
+          label: slideMatch ? `Slide ${slideMatch[1]}` : section.part,
+          content: section.text.split(/\r\n|\r|\n/),
+        };
+      });
       setFiles((current) => current.map((file) => (
         file.id === documentId
           ? {
             ...file,
-            content: content.length ? content : ['No supported literal text was found in this document.'],
+            content: previewSections[0]?.content || (content.length ? content : ['No supported literal text was found in this document.']),
+            previewSections,
+            previewSectionsTruncated: data.previewSectionsTruncated || false,
             rawText: data.text ?? content.join('\n'),
             previewFormat: data.format,
             previewEncoding: data.encoding,
-            previewWarnings: data.warnings,
+            previewWarnings: data.warnings || [],
+            previewCoverage: data.coverage || null,
+            previewLineEndings: data.lineEndings || null,
+            previewDialect: data.dialect || null,
+            existingPlaceholderLikeTextCount: data.existingPlaceholderLikeTextCount || 0,
             previewTruncated: data.truncated,
             previewError: false,
             previewLoaded: true,
@@ -307,6 +316,17 @@ export default function App() {
       )));
       setToast(error.message || 'Could not parse this document for preview');
     }
+  };
+
+  const selectPreviewSection = (index) => {
+    if (!previewSections.length) return;
+    const nextIndex = Math.min(Math.max(index, 0), previewSections.length - 1);
+    setSectionIndex(nextIndex);
+    setFiles((current) => current.map((file) => (
+      file.id === activeFile.id
+        ? { ...file, content: previewSections[nextIndex].content }
+        : file
+    )));
   };
 
   const setProjectCandidateDecision = async (candidate, decision) => {
@@ -442,6 +462,8 @@ export default function App() {
       }));
       setFiles((current) => [...imported, ...current.filter((file) => !imported.some((document) => document.id === file.id))]);
       setActiveName(imported[0].id);
+      setSectionIndex(0);
+      setDenseText(false);
       setSelectedGroup('alex');
       setView('preview');
       await loadProjectDocumentPreview(imported[0].id);
@@ -541,6 +563,8 @@ export default function App() {
       setCurrentProject(data);
       setFiles([...savedDocuments, ...initialFiles]);
       setActiveName(savedDocuments[0]?.id || initialFiles[0].name);
+      setSectionIndex(0);
+      setDenseText(false);
       setProjectModalOpen(false);
       if (savedDocuments[0]) await loadProjectDocumentPreview(savedDocuments[0].id);
       setToast(`${projectAction === 'create' ? 'Created' : 'Opened'} local project “${data.name}”`);
@@ -594,6 +618,13 @@ export default function App() {
 
   const switchFile = (file) => {
     setActiveName(file.id || file.name);
+    setSectionIndex(0);
+    setDenseText(false);
+    if (file.previewSections?.length) {
+      setFiles((current) => current.map((item) => (
+        item.id === file.id ? { ...item, content: file.previewSections[0].content } : item
+      )));
+    }
     setSelectedGroup('alex');
     setView('preview');
     setUndo(null);
@@ -609,7 +640,7 @@ export default function App() {
   };
 
   return (
-    <div className="app-shell" data-project-preview={activeFile.isProjectDocument ? 'true' : undefined} data-preview-error={activeFile.previewError ? 'true' : undefined}>
+    <div className="app-shell" data-project-preview={activeFile.isProjectDocument ? 'true' : undefined} data-preview-error={activeFile.previewError ? 'true' : undefined} data-dense-text={denseText ? 'true' : undefined}>
       <aside className="sidebar" data-od-id="sidebar">
         <div className="brand-row"><div className="brand-mark" aria-hidden="true">B</div><div><div className="brand-name">Blot</div><div className="brand-sub">private document workspace</div></div></div>
         <div className="side-section"><div className="side-label">Workspace</div><button className="side-link active" onClick={() => setToast('Review queue opened')}><span className="side-icon">◈</span> Review queue</button><button className="side-link" onClick={() => setToast('Showing all project files')}><span className="side-icon">□</span> All files <span style={{ marginLeft: 'auto', fontSize: 11 }}>{files.length}</span></button><button className="side-link" onClick={() => setToast('Activity is up to date')}><span className="side-icon">↺</span> Activity</button></div>
@@ -624,16 +655,29 @@ export default function App() {
             <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${files.filter((file) => file.isProjectDocument).length} saved` : `${files.length} items`}</span></div><div className="file-list">{files.map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span><span className="file-name">{file.name}</span><span className="file-status">{file.isProjectDocument ? file.status : currentProject ? 'Synthetic sample · not saved' : file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : file.status.includes('Restore') ? '↗' : ''}</span></button>)}</div></aside>
             <section className="panel review-panel">
               <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? 'Original source · not parsed or modified' : `Editable text view · ${activeFile.content.length} ${activeFile.type === 'PPTX' ? 'slides' : 'pages'} · local preview`}</span></div><div className="view-switch" role="tablist" aria-label="Document view"><button className={view === 'preview' ? 'active' : ''} role="tab" aria-selected={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button className={view === 'changes' ? 'active' : ''} role="tab" aria-selected={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div>
-              <div className="slider-area"><div className="slider-labels"><label htmlFor="sensitivity">Candidate breadth</label><span className="slider-value">Level {level} / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value={level} onChange={(event) => setLevel(Number(event.target.value))} /><div className="range-notes"><span>Narrow · high confidence</span><span>All detected candidates</span></div></div>
-              {view === 'preview' ? <div className="preview"><div className="preview-note"><span className="status-dot" /><span>{activeFile.isProjectDocument ? (activeFile.candidateLoading ? 'Scanning supported editable text locally…' : `${visibleCandidates.length} candidates shown at level ${level}. Suggestions need your review.`) : `${visibleGroups.length} suggested groups are visible at this level. Click a highlighted term to decide.`}</span></div><article className="doc-page"><div className="doc-kicker">BOARD UPDATE · 04 OCTOBER 2026</div><h2>{activeFile.heading}</h2>{activeFile.content.map((paragraph, index) => <p key={`${activeFile.name}-${index}`}>{renderParagraph(paragraph)}</p>)}<div className="legend"><span className="legend-item"><span className="legend-swatch" />Suggested</span><span className="legend-item"><span className="legend-swatch manual" />Manual decision</span><span className="legend-item">Click a term to inspect its group</span></div></article><div className="preview-foot"><span><strong>{activeFile.isProjectDocument ? visibleCandidates.reduce((sum, candidate) => sum + (candidate.decision === 'excluded' ? 0 : candidate.occurrenceCount), 0) : matchCount}</strong> occurrences in review at level <strong>{level}</strong></span><span>Original stays unchanged</span></div>{undo?.file === activeName && <button className="small-btn undo-button" onClick={undoDecision}>Undo last decision</button>}</div> : <div className="preview changes-pane"><div className="preview-note"><span className="status-dot" /><span>Export diff for version 03</span></div><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr style={{ color: 'var(--muted)', font: '11px var(--font-mono)', textAlign: 'left' }}><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>OCCURRENCE</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>REPLACEMENT</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>DECISION</th></tr></thead><tbody>{changeRows.map(({ group, occurrences, decision }) => <tr key={group.id}><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{group.term} · {occurrences} {occurrences === 1 ? 'match' : 'matches'}</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>[[{group.token}]]</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{decision === 'excluded' ? 'Excluded' : decision === 'included' ? 'Included' : 'Suggested'}</td></tr>)}</tbody></table></div>}
+              <div className="slider-area"><div className="slider-labels"><label htmlFor="sensitivity">Candidate breadth</label><span className="slider-value">Level {level} / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value={level} aria-valuetext={`Level ${level} of 10 candidate breadth`} onChange={(event) => setLevel(Number(event.target.value))} /><div className="range-notes"><span>Narrow · fewer candidate types</span><span>All detected candidates</span></div></div>
+              {view === 'preview' ? <div className="preview"><div className="preview-note"><span className="status-dot" /><span>{activeFile.isProjectDocument ? (activeFile.candidateLoading ? 'Scanning supported editable text locally…' : `${visibleCandidates.length} candidates shown at level ${level}. Review decisions below; only supported editable text is scanned.`) : `${visibleGroups.length} suggested groups are visible at this level. Click a highlighted term to decide.`}</span></div><article className="doc-page"><div className="doc-kicker">BOARD UPDATE · 04 OCTOBER 2026</div><h2>{activeFile.heading}</h2>{activeFile.content.map((paragraph, index) => <p key={`${activeFile.name}-${index}`}>{renderParagraph(paragraph)}</p>)}<div className="legend"><span className="legend-item"><span className="legend-swatch" />Suggested</span><span className="legend-item"><span className="legend-swatch manual" />Manual decision</span><span className="legend-item">Click a term to inspect its group</span></div></article><div className="preview-foot"><span><strong>{activeFile.isProjectDocument ? visibleCandidates.reduce((sum, candidate) => sum + (candidate.decision === 'excluded' ? 0 : candidate.occurrenceCount), 0) : matchCount}</strong> included or suggested occurrences at level <strong>{level}</strong></span><span>Original stays unchanged</span></div>{undo?.file === activeName && <button className="small-btn undo-button" onClick={undoDecision}>Undo last decision</button>}</div> : <div className="preview changes-pane"><div className="preview-note"><span className="status-dot" /><span>Export diff for version 03</span></div><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr style={{ color: 'var(--muted)', font: '11px var(--font-mono)', textAlign: 'left' }}><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>OCCURRENCE</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>REPLACEMENT</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>DECISION</th></tr></thead><tbody>{changeRows.map(({ group, occurrences, decision }) => <tr key={group.id}><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{group.term} · {occurrences} {occurrences === 1 ? 'match' : 'matches'}</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>[[{group.token}]]</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{decision === 'excluded' ? 'Excluded' : decision === 'included' ? 'Included' : 'Suggested'}</td></tr>)}</tbody></table></div>}
             </section>
             <aside className="right-stack">
               {activeFile.isProjectDocument ? <section className="panel candidate-panel">
                 <div className="panel-head"><span className="panel-title">Candidate review</span><span className="panel-meta">{visibleCandidates.length} shown</span></div>
+                <label className="dense-toggle"><input type="checkbox" checked={denseText} onChange={(event) => setDenseText(event.target.checked)} /> Dense text view</label>
+                {previewSections.length > 1 && <div className="preview-navigation" role="group" aria-label="Preview sections">
+                  <button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex - 1)} disabled={sectionIndex <= 0} aria-label="Previous preview section">Previous</button>
+                  <span aria-live="polite"><strong>Section {sectionIndex + 1} of {previewSections.length}</strong><small>{activeSection?.label}</small></span>
+                  <button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex + 1)} disabled={sectionIndex >= previewSections.length - 1} aria-label="Next preview section">Next</button>
+                </div>}
                 <form className="manual-candidate-form" onSubmit={addManualCandidate}>
                   <label htmlFor="manual-candidate">Select a phrase in the preview or type it</label>
                   <div><input id="manual-candidate" value={manualPhrase} onChange={(event) => setManualPhrase(event.target.value)} maxLength={256} placeholder="Type a phrase to include" /><button className="small-btn primary" type="submit" disabled={activeFile.candidateLoading || !manualPhrase.trim()}>Add</button></div>
                 </form>
+                <div className="candidate-counts" role="status" aria-live="polite" aria-label="Candidate review counts">
+                  <span><strong>{candidateDecisionCounts.suggested}</strong> need review</span>
+                  <span><strong>{candidateDecisionCounts.included}</strong> included</span>
+                  <span><strong>{candidateDecisionCounts.excluded}</strong> excluded</span>
+                  {belowLevelCount > 0 && <span><strong>{belowLevelCount}</strong> suggested below this level</span>}
+                  <span><strong>{proposals.length}</strong> proposals not in a group</span>
+                </div>
                 <div className="graph-list">
                   {activeFile.candidateLoading && <p role="status">Scanning supported text locally…</p>}
                   {activeFile.candidateError && <p className="candidate-error" role="alert">{activeFile.candidateError} <button className="small-btn" onClick={() => loadProjectDocumentCandidates(activeFile.id)}>Retry</button></p>}
@@ -652,6 +696,32 @@ export default function App() {
                 {proposals.length > 0 && <div className="candidate-subsection"><div className="candidate-subhead">Similarity proposals · confirm before grouping</div>{proposals.slice(0, 50).map((proposal) => <div className="proposal-row" key={proposal.id}><div><strong>{candidatesById[proposal.sourceId].term} ↔ {candidatesById[proposal.targetId].term}</strong><span>{proposal.reason}</span></div><button className="small-btn" onClick={() => applyCandidateGroupOperation('add', [proposal.sourceId, proposal.targetId])}>Confirm group</button></div>)}</div>}
                 {candidateGroups.length > 0 && <div className="candidate-subsection"><div className="candidate-subhead">Confirmed groups</div>{candidateGroups.map((group) => <div className="confirmed-group" key={group.id}><label><input type="checkbox" checked={mergeGroupIds.includes(group.id)} onChange={(event) => setMergeGroupIds((current) => event.target.checked ? [...current, group.id] : current.filter((id) => id !== group.id))} /> Merge group</label>{group.candidateIds.map((candidateId) => <div className="confirmed-member" key={candidateId}><span>{candidatesById[candidateId]?.term || 'Candidate'}</span><div>{group.candidateIds.length > 1 && <button className="small-btn" onClick={() => applyCandidateGroupOperation('split', [candidateId], group.id)}>Split out</button>}<button className="small-btn" onClick={() => applyCandidateGroupOperation('remove', [candidateId], group.id)}>Remove</button></div></div>)}</div>)}<button className="small-btn" disabled={mergeGroupIds.length < 2} onClick={() => applyCandidateGroupOperation('merge', [], undefined, mergeGroupIds)}>Merge selected groups</button></div>}
               </section> : <section className="panel"><div className="panel-head"><span className="panel-title">Suggested groups</span><span className="panel-meta">{visibleGroups.length} groups</span></div><div className="graph-list">{visibleGroups.length ? visibleGroups.map((group) => <div key={group.id} className={`graph-card ${selectedGroup === group.id ? 'selected' : ''}`} onClick={() => setSelectedGroup(group.id)}><div className="graph-card-head"><span className="graph-term">{group.term}</span><span className="confidence">{group.confidence} match</span></div><p className="graph-reason">{group.reason}</p><div className="member-row">{group.members.map((member, index) => <span key={member} className={`member ${confirmed[group.id] || (index === 0 && group.id === 'alex') ? 'confirmed' : ''}`}>{member} · {countMatches(activeText, member)}</span>)}</div><div className="graph-actions"><button className="small-btn primary" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'included'); }}>{decisions[group.id] === 'included' ? 'Included' : 'Include group'}</button><button className="small-btn" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'excluded'); }}>Exclude</button></div></div>) : <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>No detected groups at this level.</p>}</div></section>}
+              {activeFile.isProjectDocument && <section className="panel coverage-panel" aria-labelledby="coverage-title">
+                <div className="panel-head"><span id="coverage-title" className="panel-title">Coverage and limits</span><span className="panel-meta">{activeFile.previewFormat || activeFile.type}</span></div>
+                <div className={`coverage-alert ${unsupportedPartCount || previewWarnings.length ? 'has-warning' : ''}`} role={unsupportedPartCount || previewWarnings.length ? 'alert' : 'status'}>
+                  {previewWarnings.length > 0 ? previewWarnings.join(' ') : unsupportedPartCount > 0 ? `${unsupportedPartCount} unsupported package parts were detected.` : 'This report describes adapter coverage; it does not guarantee that every sensitive value was detected.'}
+                </div>
+                <dl className="coverage-stats">
+                  <div><dt>Adapter / encoding</dt><dd>{activeFile.previewFormat || 'Loading'}{activeFile.previewEncoding ? ` · ${activeFile.previewEncoding}` : ''}</dd></div>
+                  {activeFile.previewLineEndings && <div><dt>Line endings</dt><dd>{activeFile.previewLineEndings}</dd></div>}
+                  {activeFile.previewDialect && <div><dt>CSV delimiter</dt><dd>{JSON.stringify(activeFile.previewDialect.delimiter)}</dd></div>}
+                  {previewCoverage ? <>
+                    <div><dt>XML parts examined</dt><dd>{previewCoverage.examinedXmlPartCount}</dd></div>
+                    <div><dt>Text-bearing parts</dt><dd>{previewCoverage.textPartCount}</dd></div>
+                    <div><dt>Non-XML parts skipped</dt><dd>{previewCoverage.skippedPartCount}</dd></div>
+                    <div><dt>Unsupported parts detected</dt><dd>{previewCoverage.unsupportedPartCount}</dd></div>
+                  </> : <div><dt>Coverage inventory</dt><dd>Package-part inventory not provided for this format</dd></div>}
+                  {activeFile.previewTruncated && <div><dt>Preview</dt><dd>Truncated; saved original remains complete</dd></div>}
+                  {activeFile.previewSectionsTruncated && <div><dt>Sections</dt><dd>Section list or text truncated to preview limits</dd></div>}
+                  {activeFile.existingPlaceholderLikeTextCount > 0 && <div><dt>Placeholder-like strings</dt><dd>{activeFile.existingPlaceholderLikeTextCount} found; review before processing</dd></div>}
+                </dl>
+                {previewCoverage && <details className="coverage-details">
+                  <summary>View bounded package-part inventory</summary>
+                  {previewCoverage.partNamesTruncated && <p className="coverage-truncated">Part names are truncated to a bounded list.</p>}
+                  {[['Examined XML parts', previewCoverage.examinedXmlParts], ['Text-bearing parts', previewCoverage.textParts], ['Skipped parts', previewCoverage.skippedParts], ['Unsupported parts', previewCoverage.unsupportedParts]].map(([label, parts]) => parts?.length > 0 && <div className="coverage-part-list" key={label}><strong>{label}</strong><ul>{parts.map((part) => <li key={`${label}-${part}`}>{part}</li>)}</ul></div>)}
+                </details>}
+                <p className="coverage-scope">Only adapter-supported editable text is reviewed. Images/OCR, metadata, macros, embedded binary content, and unhandled text surfaces are not analyzed. Unsupported-part warnings must be considered before any later export.</p>
+              </section>}
               <section className="panel status-card"><div className="status-line"><span className="status-dot" /><div><strong>Private local workspace</strong><p>{currentProject ? 'Project metadata and graph state are stored locally; demo documents are not part of this project.' : 'Text preview runs in this browser. No document is uploaded.'}</p></div></div><hr className="rule" /><div className="status-stat"><span>Graph protection</span><span>{currentProject ? 'AES-GCM' : 'Session only'}</span></div><div className="status-stat"><span>Project state</span><span>{currentProject ? 'saved locally' : 'demo only'}</span></div><div className="status-stat"><span>File ceiling</span><span>100 MB</span></div></section>
               <section className="panel status-card"><div className="panel-head" style={{ padding: '0 0 12px', border: 0, minHeight: 'auto' }}><span className="panel-title">Restore returned file</span><span className="panel-meta">1 ready</span></div><p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 12, lineHeight: 1.45 }}>agent-return.pptx has placeholders from this project's sample graph.</p><button className="primary-btn" style={{ width: '100%' }} onClick={restorePreview}>Preview restoration</button></section>
             </aside>
