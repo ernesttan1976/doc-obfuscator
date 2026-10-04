@@ -365,6 +365,122 @@ async def test_document_preview_is_token_protected_and_returns_parsed_content(tm
 
 
 @pytest.mark.anyio
+async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_decisions(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "brief.md"
+    root.mkdir()
+    source.write_text(
+        "Alex Tan and Alex Tann met on May 7, 2026. Contact alex@example.test.",
+        encoding="utf-8",
+    )
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        headers = {"X-Local-App-Token": app.state.local_token}
+        await client.post("/api/projects", json={"name": "Project", "directory": str(root)}, headers=headers)
+        imported = await client.post(
+            "/api/projects/documents",
+            json={"directory": str(root), "files": [str(source)]},
+            headers=headers,
+        )
+        document_id = imported.json()["documents"][0]["id"]
+        request = {"directory": str(root), "document_id": document_id}
+        denied = await client.post("/api/projects/document-candidates", json=request)
+        analysis = await client.post(
+            "/api/projects/document-candidates",
+            json={**request, "manual_terms": ["Alex Tan"]},
+            headers=headers,
+        )
+        candidates = analysis.json()["candidates"]
+        email = next(candidate for candidate in candidates if candidate["term"] == "alex@example.test")
+        decision = await client.post(
+            "/api/projects/candidate-decision",
+            json={**request, "candidate_id": email["id"], "decision": "excluded"},
+            headers=headers,
+        )
+        repeated = await client.post(
+            "/api/projects/document-candidates",
+            json=request,
+            headers=headers,
+        )
+        manual = next(candidate for candidate in candidates if candidate["term"].casefold() == "alex tan")
+        variant = next(candidate for candidate in candidates if candidate["term"] == "Alex Tann")
+        first_group = await client.post(
+            "/api/projects/candidate-groups",
+            json={**request, "operation": "add", "candidate_ids": [manual["id"], variant["id"]]},
+            headers=headers,
+        )
+        first_group_id = first_group.json()["groups"][0]["id"]
+        second_group = await client.post(
+            "/api/projects/candidate-groups",
+            json={**request, "operation": "add", "candidate_ids": [email["id"]]},
+            headers=headers,
+        )
+        second_group_id = next(
+            group["id"] for group in second_group.json()["groups"] if group["id"] != first_group_id
+        )
+        merged = await client.post(
+            "/api/projects/candidate-groups",
+            json={**request, "operation": "merge", "group_ids": [first_group_id, second_group_id]},
+            headers=headers,
+        )
+        merged_group = merged.json()["groups"][0]
+        split = await client.post(
+            "/api/projects/candidate-groups",
+            json={
+                **request,
+                "operation": "split",
+                "group_id": merged_group["id"],
+                "candidate_ids": [variant["id"]],
+            },
+            headers=headers,
+        )
+        split_group = next(
+            group for group in split.json()["groups"] if group["candidateIds"] == [variant["id"]]
+        )
+        removed = await client.post(
+            "/api/projects/candidate-groups",
+            json={
+                **request,
+                "operation": "remove",
+                "group_id": split_group["id"],
+                "candidate_ids": [variant["id"]],
+            },
+            headers=headers,
+        )
+        absent_phrase = await client.post(
+            "/api/projects/document-candidates",
+            json={**request, "manual_terms": ["not in the document"]},
+            headers=headers,
+        )
+
+    assert denied.status_code == 401
+    assert analysis.status_code == 200
+    assert analysis.json()["versionId"] == imported.json()["documents"][0]["versionId"]
+    assert analysis.json()["groups"] == []
+    assert analysis.json()["proposals"]
+    assert all(proposal["confirmed"] is False for proposal in analysis.json()["proposals"])
+    assert manual["decision"] == "included"
+    assert manual["pinned"] is True
+    assert decision.status_code == 200
+    assert decision.json()["decision"] == "excluded"
+    assert decision.json()["pinned"] is True
+    persisted_email = next(
+        candidate for candidate in repeated.json()["candidates"] if candidate["id"] == email["id"]
+    )
+    assert persisted_email["decision"] == "excluded"
+    assert persisted_email["pinned"] is True
+    assert first_group.status_code == second_group.status_code == merged.status_code == 200
+    assert len(first_group.json()["groups"]) == 1
+    assert all(group["confirmed"] is True for group in merged.json()["groups"])
+    assert variant["id"] in split_group["candidateIds"]
+    assert all(variant["id"] not in group["candidateIds"] for group in removed.json()["groups"])
+    assert absent_phrase.status_code == 400
+    encrypted_state = (root / ".blot" / "private-state.enc").read_bytes()
+    assert b"alex@example.test" not in encrypted_state
+    assert b"Alex Tan" not in encrypted_state
+
+
+@pytest.mark.anyio
 async def test_native_folder_picker_is_token_protected_and_returns_only_user_selection(tmp_path, monkeypatch):
     selected = tmp_path / "local project"
     monkeypatch.setattr(main_module, "pick_project_directory", lambda: selected)

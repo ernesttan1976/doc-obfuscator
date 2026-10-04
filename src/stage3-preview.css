@@ -1,20 +1,14 @@
 .app-shell[data-project-preview='true'] .page-head .eyebrow,
 .app-shell[data-project-preview='true'] .page-head h1,
 .app-shell[data-project-preview='true'] .page-head .subhead,
-.app-shell[data-project-preview='true'] .review-title > span,
-.app-shell[data-project-preview='true'] .preview-note > span:last-child,
-.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .panel-title,
-.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .graph-list > p {
+.app-shell[data-project-preview='true'] .review-title > span {
   font-size: 0;
 }
 
 .app-shell[data-project-preview='true'] .page-head .eyebrow::after,
 .app-shell[data-project-preview='true'] .page-head h1::after,
 .app-shell[data-project-preview='true'] .page-head .subhead::after,
-.app-shell[data-project-preview='true'] .review-title > span::after,
-.app-shell[data-project-preview='true'] .preview-note > span:last-child::after,
-.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .panel-title::after,
-.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .graph-list > p::after {
+.app-shell[data-project-preview='true'] .review-title > span::after {
   font-size: 13px;
 }
 
@@ -23,45 +17,25 @@
 }
 
 .app-shell[data-project-preview='true'] .page-head h1::after {
-  content: 'Document preview';
+  content: 'Document review';
   font-size: 30px;
 }
 
 .app-shell[data-project-preview='true'] .page-head .subhead::after {
-  content: 'Content is parsed locally for review. The original remains unchanged; candidate review and export come later.';
+  content: 'Candidates are local suggestions. Review every decision; the saved original remains unchanged.';
   color: var(--muted);
 }
 
 .app-shell[data-project-preview='true'] .page-head > .primary-btn,
 .app-shell[data-project-preview='true'] .review-toolbar .view-switch,
-.app-shell[data-project-preview='true'] .slider-area,
 .app-shell[data-project-preview='true'] .doc-kicker,
 .app-shell[data-project-preview='true'] .legend,
-.app-shell[data-project-preview='true'] .preview-foot,
-.app-shell[data-project-preview='true'] .undo-button,
 .app-shell[data-project-preview='true'] .right-stack > .panel:last-child {
   display: none;
 }
 
 .app-shell[data-project-preview='true'] .review-title > span::after {
-  content: 'Original · parsed preview only · no changes saved';
-}
-
-.app-shell[data-project-preview='true'] .preview-note > span:last-child::after {
-  content: 'No candidate extraction has run. The content below is a local format preview.';
-}
-
-.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .panel-title::after {
-  content: 'Candidate extraction';
-}
-
-.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .panel-meta {
-  display: none;
-}
-
-.app-shell[data-project-preview='true'] .right-stack > .panel:first-child .graph-list > p::after {
-  content: 'Candidate extraction is a later stage.';
-  color: var(--muted);
+  content: 'Original · local candidate review · no document changes';
 }
 
 .app-shell[data-project-preview='true'][data-preview-error='true'] .page-head .eyebrow::after {
@@ -80,6 +54,113 @@
   content: 'Saved original · not parsed or modified';
 }
 
-.app-shell[data-project-preview='true'][data-preview-error='true'] .preview-note > span:last-child::after {
-  content: 'The local preview could not be generated. The original remains unchanged.';
+.manual-candidate-form {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.manual-candidate-form label,
+.candidate-subhead {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+}
+
+.manual-candidate-form > div,
+.confirmed-member,
+.proposal-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.manual-candidate-form input {
+  min-width: 0;
+  flex: 1;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.candidate-panel .graph-list {
+  max-height: 38vh;
+  overflow-y: auto;
+}
+
+.candidate-card .graph-reason,
+.candidate-location,
+.candidate-error,
+.candidate-limit {
+  margin: 7px 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.candidate-error {
+  color: var(--danger, #a33);
+}
+
+.candidate-subsection {
+  padding: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.proposal-row,
+.confirmed-group {
+  padding: 9px 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.proposal-row {
+  justify-content: space-between;
+}
+
+.proposal-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.proposal-row strong,
+.confirmed-member > span {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.proposal-row span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.proposal-row .small-btn,
+.confirmed-member .small-btn {
+  flex: 0 0 auto;
+  padding: 0 7px;
+}
+
+.confirmed-group > label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.confirmed-member {
+  justify-content: space-between;
+  padding: 5px 0;
+}
+
+.confirmed-member > div {
+  display: flex;
+  gap: 5px;
 }

@@ -3,11 +3,14 @@ pyproject.toml
 backend/__init__.py
 backend/app/__init__.py
 backend/app/__main__.py
+backend/app/candidate_engine.py
+backend/app/document_adapters.py
 backend/app/folder_picker.py
 backend/app/key_store.py
 backend/app/local_crypto.py
 backend/app/main.py
 backend/app/projects.py
+backend/tests/test_document_adapters.py
 backend/tests/test_local_service.py
 blot_local.egg-info/PKG-INFO
 blot_local.egg-info/SOURCES.txt

@@ -7,6 +7,7 @@ Requires-Dist: cryptography<47,>=44
 Requires-Dist: defusedxml<0.8,>=0.7.1
 Requires-Dist: fastapi==0.142.2
 Requires-Dist: keyring<27,>=25
+Requires-Dist: rapidfuzz==3.14.3
 Requires-Dist: uvicorn==0.54.0
 Provides-Extra: dev
 Requires-Dist: httpx==0.28.1; extra == "dev"

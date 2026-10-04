@@ -12,6 +12,7 @@ dependencies = [
   "defusedxml>=0.7.1,<0.8",
   "fastapi==0.142.2",
   "keyring>=25,<27",
+  "rapidfuzz==3.14.3",
   "uvicorn==0.54.0",
 ]
 

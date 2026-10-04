@@ -5,6 +5,7 @@ import ipaddress
 import os
 import secrets
 from pathlib import Path
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import uvicorn
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .candidate_engine import CandidateError
 from .document_adapters import DocumentAdapterError
 from .folder_picker import (
     FolderPickerError,
@@ -84,6 +86,31 @@ class ImportDocumentsRequest(BaseModel):
 class PreviewDocumentRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=4096)
     document_id: str = Field(min_length=1, max_length=100)
+
+
+class AnalyzeCandidatesRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
+    manual_terms: list[Annotated[str, Field(min_length=1, max_length=256)]] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+
+
+class CandidateDecisionRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
+    candidate_id: str = Field(min_length=1, max_length=100)
+    decision: str = Field(min_length=1, max_length=20)
+
+
+class CandidateGroupRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
+    operation: Literal["add", "remove", "split", "merge"]
+    candidate_ids: list[str] = Field(default_factory=list, max_length=1000)
+    group_id: str | None = Field(default=None, max_length=100)
+    group_ids: list[str] = Field(default_factory=list, max_length=1000)
 
 
 def create_app(
@@ -210,6 +237,52 @@ def create_app(
         except DocumentAdapterError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/document-candidates")
+    def analyze_project_document_candidates(payload: AnalyzeCandidatesRequest) -> dict[str, object]:
+        try:
+            return project_service().analyze_document_candidates(
+                payload.directory,
+                payload.document_id,
+                payload.manual_terms,
+            )
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except DocumentAdapterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (CandidateError, ProjectError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/candidate-decision")
+    def update_project_candidate_decision(payload: CandidateDecisionRequest) -> dict[str, object]:
+        try:
+            return project_service().set_candidate_decision(
+                payload.directory,
+                payload.document_id,
+                payload.candidate_id,
+                payload.decision,
+            )
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except (CandidateError, ProjectError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/candidate-groups")
+    def update_project_candidate_groups(payload: CandidateGroupRequest) -> dict[str, object]:
+        try:
+            groups = project_service().update_candidate_groups(
+                payload.directory,
+                payload.document_id,
+                payload.operation,
+                payload.candidate_ids,
+                payload.group_id,
+                payload.group_ids,
+            )
+            return {"groups": groups}
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except (CandidateError, ProjectError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     index_file = frontend_dist / "obfuscation-workspace.html"

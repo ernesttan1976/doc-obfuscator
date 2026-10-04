@@ -12,6 +12,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .candidate_engine import (
+    CandidateError,
+    analyze_candidates,
+    blocks_for_document,
+    decide_candidate,
+)
 from .document_adapters import parse_document
 from .key_store import KeyStoreUnavailable, ProjectKeyStore
 from .local_crypto import atomic_write_private, decrypt_state, encrypt_state
@@ -143,12 +149,205 @@ class ProjectService:
 
     def preview_document(self, directory: str | Path, document_id: str) -> dict[str, object]:
         root = self._validate_directory(directory)
+        parsed, _ = self._read_original_document(root, document_id)
+        return parsed.to_public_dict()
+
+    def analyze_document_candidates(
+        self,
+        directory: str | Path,
+        document_id: str,
+        manual_terms: list[str] | None = None,
+    ) -> dict[str, object]:
+        root = self._validate_directory(directory)
+        parsed, version_id = self._read_original_document(root, document_id)
+        state = self.load_private_state(root)
+        graph = state.setdefault("graph", {"nodes": [], "edges": [], "decisions": {}})
+        nodes = graph.setdefault("nodes", [])
+        edges = graph.setdefault("edges", [])
+        existing_nodes = [
+            node for node in nodes
+            if node.get("documentId") == document_id and node.get("versionId") == version_id
+        ]
+        retained_manual_terms = [
+            str(node["term"]) for node in existing_nodes if node.get("source") == "manual"
+        ]
+        candidates, proposals = analyze_candidates(
+            blocks_for_document(parsed),
+            document_id,
+            version_id,
+            existing_nodes,
+            [*retained_manual_terms, *(manual_terms or [])],
+        )
+        old_ids = {node["id"] for node in existing_nodes}
+        graph["nodes"] = [node for node in nodes if node.get("id") not in old_ids] + candidates
+        graph["edges"] = [
+            edge for edge in edges
+            if edge.get("sourceId") not in old_ids and edge.get("targetId") not in old_ids
+        ] + proposals
+        self.save_private_state(root, state)
+        groups = graph.setdefault("groups", [])
+        return {
+            "documentId": document_id,
+            "versionId": version_id,
+            "candidates": candidates,
+            "proposals": proposals,
+            "groups": [
+                group for group in groups
+                if group.get("documentId") == document_id and group.get("versionId") == version_id
+            ],
+            "candidateLimitReached": len(candidates) >= 1_000,
+            "proposalLimitReached": len(proposals) >= 1_000,
+        }
+
+    def set_candidate_decision(
+        self,
+        directory: str | Path,
+        document_id: str,
+        candidate_id: str,
+        decision: str,
+    ) -> dict[str, object]:
+        root = self._validate_directory(directory)
+        version_id = self._original_version_id(root, document_id)
+        state = self.load_private_state(root)
+        graph = state.setdefault("graph", {"nodes": [], "edges": [], "decisions": {}})
+        nodes = graph.setdefault("nodes", [])
+        scoped_nodes = [
+            node for node in nodes
+            if node.get("documentId") == document_id and node.get("versionId") == version_id
+        ]
+        updated = decide_candidate(scoped_nodes, candidate_id, decision)
+        self.save_private_state(root, state)
+        return updated
+
+    def update_candidate_groups(
+        self,
+        directory: str | Path,
+        document_id: str,
+        operation: str,
+        candidate_ids: list[str] | None = None,
+        group_id: str | None = None,
+        group_ids: list[str] | None = None,
+    ) -> list[dict[str, object]]:
+        root = self._validate_directory(directory)
+        version_id = self._original_version_id(root, document_id)
+        state = self.load_private_state(root)
+        graph = state.setdefault("graph", {"nodes": [], "edges": [], "decisions": {}})
+        groups = graph.setdefault("groups", [])
+        scoped_groups = [
+            group for group in groups
+            if group.get("documentId") == document_id and group.get("versionId") == version_id
+        ]
+        scoped_nodes = {
+            node["id"] for node in graph.setdefault("nodes", [])
+            if node.get("documentId") == document_id and node.get("versionId") == version_id
+        }
+        requested_candidates = list(dict.fromkeys(candidate_ids or []))
+        requested_groups = list(dict.fromkeys(group_ids or []))
+
+        if operation in {"add", "split"} and (
+            not requested_candidates or any(candidate not in scoped_nodes for candidate in requested_candidates)
+        ):
+            raise CandidateError("Choose existing candidates from this document version.")
+        if operation == "add":
+            matching = next((group for group in scoped_groups if group.get("id") == group_id), None)
+            if group_id is not None and matching is None:
+                raise CandidateError("The selected confirmed group was not found in this document version.")
+            memberships = {
+                candidate
+                for group in scoped_groups if group is not matching
+                for candidate in group.get("candidateIds", [])
+            }
+            if memberships.intersection(requested_candidates):
+                raise CandidateError("A candidate already belongs to another confirmed group.")
+            if matching is None:
+                matching = {
+                    "id": str(uuid.uuid4()),
+                    "documentId": document_id,
+                    "versionId": version_id,
+                    "candidateIds": [],
+                    "confirmed": True,
+                    "source": "manual",
+                }
+                groups.append(matching)
+            matching["candidateIds"] = list(dict.fromkeys(matching["candidateIds"] + requested_candidates))
+        elif operation == "remove":
+            matching = next((group for group in scoped_groups if group.get("id") == group_id), None)
+            if matching is None or not requested_candidates:
+                raise CandidateError("Choose an existing group and one or more of its members to remove.")
+            if not set(requested_candidates).issubset(matching.get("candidateIds", [])):
+                raise CandidateError("Only members of the selected group can be removed.")
+            matching["candidateIds"] = [
+                candidate for candidate in matching["candidateIds"] if candidate not in requested_candidates
+            ]
+            if not matching["candidateIds"]:
+                groups.remove(matching)
+        elif operation == "split":
+            matching = next((group for group in scoped_groups if group.get("id") == group_id), None)
+            if matching is None or not set(requested_candidates).issubset(matching.get("candidateIds", [])):
+                raise CandidateError("Choose members of an existing confirmed group to split.")
+            remaining = [candidate for candidate in matching["candidateIds"] if candidate not in requested_candidates]
+            if not remaining:
+                raise CandidateError("A split must leave at least one member in each group.")
+            matching["candidateIds"] = remaining
+            groups.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "documentId": document_id,
+                    "versionId": version_id,
+                    "candidateIds": requested_candidates,
+                    "confirmed": True,
+                    "source": "manual",
+                }
+            )
+        elif operation == "merge":
+            selected = [group for group in scoped_groups if group.get("id") in requested_groups]
+            if len(requested_groups) < 2 or len(selected) != len(requested_groups):
+                raise CandidateError("Choose at least two confirmed groups from this document version to merge.")
+            merged_members = list(
+                dict.fromkeys(candidate for group in selected for candidate in group.get("candidateIds", []))
+            )
+            groups[:] = [group for group in groups if group not in selected]
+            groups.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "documentId": document_id,
+                    "versionId": version_id,
+                    "candidateIds": merged_members,
+                    "confirmed": True,
+                    "source": "manual",
+                }
+            )
+        else:
+            raise CandidateError("Group operation must be add, remove, split, or merge.")
+
+        self.save_private_state(root, state)
+        return [group for group in groups if group.get("documentId") == document_id and group.get("versionId") == version_id]
+
+    def _original_version_id(self, root: Path, document_id: str) -> str:
+        self.open(root)
+        connection = sqlite3.connect(root / ".blot" / DATABASE_NAME)
+        try:
+            row = connection.execute(
+                "SELECT id FROM versions WHERE document_id = ? AND kind = 'original'",
+                (document_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise ProjectError("Project document metadata could not be read.") from exc
+        finally:
+            connection.close()
+        if row is None:
+            raise ProjectError("The selected project document was not found.")
+        return str(row[0])
+
+    def _read_original_document(self, root: Path, document_id: str):
         self.open(root)
         private_dir = root / ".blot"
         connection = sqlite3.connect(private_dir / DATABASE_NAME)
         try:
             row = connection.execute(
-                "SELECT extension, original_path FROM documents WHERE id = ?",
+                "SELECT d.extension, d.original_path, v.id "
+                "FROM documents AS d JOIN versions AS v ON v.document_id = d.id "
+                "WHERE d.id = ? AND v.kind = 'original'",
                 (document_id,),
             ).fetchone()
         except sqlite3.Error as exc:
@@ -158,7 +357,7 @@ class ProjectService:
         if row is None:
             raise ProjectError("The selected project document was not found.")
 
-        extension, relative_path_value = row
+        extension, relative_path_value, version_id = row
         relative_path = Path(relative_path_value)
         if (
             relative_path.is_absolute()
@@ -188,7 +387,7 @@ class ProjectService:
             content = resolved_path.read_bytes()
         except (OSError, RuntimeError) as exc:
             raise ProjectError("The stored project document is missing or cannot be read.") from exc
-        return parse_document(content, extension).to_public_dict()
+        return parse_document(content, extension), version_id
 
     def import_documents(self, directory: str | Path, sources: list[str | Path]) -> list[DocumentSummary]:
         root = self._validate_directory(directory)
