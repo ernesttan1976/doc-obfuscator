@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 2,
+  "fileName": "obfuscation-workspace.html",
+  "currentVersionId": "1aa9f330-fe01-4a17-b5ca-04a4702e766e",
+  "entries": [
+    {
+      "id": "a2152c42-477e-42cd-b2ce-6216679d1e6c",
+      "fileName": "obfuscation-workspace.html",
+      "version": 1,
+      "label": "Version 1",
+      "createdAt": 1791083215343,
+      "source": "ai",
+      "prompt": "[form answers — implementation-target]\n- Which operating systems must v1 support?: macOS, Windows, and Linux [value: all_desktop]\n- Which local service architecture?: Python + FastAPI (Recommended) [value: python_fastapi]\n- How should local similarity work offline?: Bundle MiniLM with the app [value: bundle_minilm]\n- How should sensitive local data be protected?: OS account protection only [value: account_only]\n- What v1 file-size target should we guarantee?: Up to 100 MB per file [value: 100mb]",
+      "size": 32623,
+      "mime": "text/html; charset=utf-8",
+      "kind": "html",
+      "contentPath": "0001-a2152c42-477e-42cd-b2ce-6216679d1e6c.html",
+      "promptSource": "message",
+      "contentDigest": "e195977238a3676b82b35798bf26656a41f711aadb65f07992142051f4e86237"
+    },
+    {
+      "id": "1aa9f330-fe01-4a17-b5ca-04a4702e766e",
+      "fileName": "obfuscation-workspace.html",
+      "version": 2,
+      "label": "Version 2",
+      "createdAt": 1791083475351,
+      "source": "ai",
+      "prompt": "Add a dark mode.\n\nApp name Blot\n\n<active-workspace-context>\nOpenDesign selected or inferred these workspace contexts for this turn. Treat absolute paths as reference context unless the user explicitly asks to edit them.\n1. file: obfuscation-workspace.html | path: obfuscation-workspace.html | absolute: /Users/ernest/Library/Application Support/Open Design/namespaces/release-stable/data/projects/c51bb761-0d3e-4c81-b25a-58c22d401ba0/obfuscation-workspace.html | tab: obfuscation-workspace.html\n</active-workspace-context>",
+      "size": 34376,
+      "mime": "text/html; charset=utf-8",
+      "kind": "html",
+      "contentPath": "0002-1aa9f330-fe01-4a17-b5ca-04a4702e766e.html",
+      "contentDigest": "efa7094f82029b4a951e34f26cc77057a1c1067f6428cc4c562025dfd31d3918",
+      "promptSource": "message"
+    }
+  ]
+}

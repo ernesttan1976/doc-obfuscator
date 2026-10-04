@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=75,<80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blot-local"
+version = "0.1.0"
+description = "Local-only document obfuscation service"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=44,<47",
+  "fastapi==0.142.2",
+  "keyring>=25,<27",
+  "uvicorn==0.54.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "pytest==8.4.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.10",
+]

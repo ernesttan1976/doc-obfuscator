@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: blot-local
+Version: 0.1.0
+Summary: Local-only document obfuscation service
+Requires-Python: >=3.11
+Requires-Dist: cryptography<47,>=44
+Requires-Dist: fastapi==0.142.2
+Requires-Dist: keyring<27,>=25
+Requires-Dist: uvicorn==0.54.0
+Provides-Extra: dev
+Requires-Dist: httpx==0.28.1; extra == "dev"
+Requires-Dist: pytest==8.4.2; extra == "dev"

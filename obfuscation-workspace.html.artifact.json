@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "html",
+  "title": "obfuscation-workspace.html",
+  "entry": "obfuscation-workspace.html",
+  "renderer": "html",
+  "status": "complete",
+  "exports": [
+    "html",
+    "pdf",
+    "zip"
+  ],
+  "createdAt": "2026-10-04T03:06:42.361Z",
+  "updatedAt": "2026-10-04T03:06:42.361Z",
+  "metadata": {
+    "inferred": true,
+    "reconciled": true
+  }
+}

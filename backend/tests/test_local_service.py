@@ -1,0 +1,190 @@
+import secrets
+
+import httpx
+import pytest
+
+from backend.app import main as main_module
+from backend.app.key_store import KeyStoreUnavailable
+from backend.app.local_crypto import EncryptedStateError, decrypt_state, encrypt_state
+from backend.app.main import create_app
+from backend.app.projects import ProjectError, ProjectService
+
+
+class MemoryKeyStore:
+    def __init__(self):
+        self.keys = {}
+
+    def get_or_create(self, project_id):
+        if project_id not in self.keys:
+            self.keys[project_id] = secrets.token_bytes(32)
+        return self.keys[project_id]
+
+    def get(self, project_id):
+        if project_id not in self.keys:
+            raise KeyStoreUnavailable("missing test key")
+        return self.keys[project_id]
+
+    def delete(self, project_id):
+        self.keys.pop(project_id, None)
+
+
+def local_client(tmp_path, key_store=None):
+    app = create_app(tmp_path, key_store=key_store)
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 54123))
+    return app, httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8765")
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_health_is_loopback_only_and_exposes_no_document_data(tmp_path):
+    _, client_context = local_client(tmp_path)
+    async with client_context as client:
+        response = await client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "service": "blot-local", "version": "0.1.0"}
+
+
+@pytest.mark.anyio
+async def test_bootstrap_token_is_uncached_and_required_for_private_api(tmp_path):
+    _, client_context = local_client(tmp_path)
+    async with client_context as client:
+        bootstrap = await client.get("/api/bootstrap", headers={"Origin": "http://localhost:5173"})
+
+        assert bootstrap.status_code == 200
+        assert bootstrap.headers["cache-control"] == "no-store, private"
+        token = bootstrap.json()["localAppToken"]
+        assert len(token) >= 40
+        assert (await client.get("/api/session")).status_code == 401
+        session = await client.get("/api/session", headers={"X-Local-App-Token": token})
+
+    assert session.json() == {
+        "status": "ready",
+        "storage": "not-configured",
+    }
+
+
+@pytest.mark.anyio
+async def test_untrusted_origin_is_rejected(tmp_path):
+    _, client_context = local_client(tmp_path)
+    async with client_context as client:
+        response = await client.get("/api/bootstrap", headers={"Origin": "https://example.invalid"})
+
+    assert response.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_root_explains_when_frontend_build_is_missing(tmp_path):
+    _, client_context = local_client(tmp_path)
+    async with client_context as client:
+        response = await client.get("/", follow_redirects=False)
+
+    assert response.status_code == 503
+    assert "npm run build" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_root_serves_built_frontend_when_available(tmp_path):
+    (tmp_path / "obfuscation-workspace.html").write_text("<!doctype html><title>Blot</title>")
+    _, client_context = local_client(tmp_path)
+    async with client_context as client:
+        root = await client.get("/", follow_redirects=False)
+        page = await client.get("/obfuscation-workspace.html")
+
+    assert root.status_code == 307
+    assert root.headers["location"] == "/obfuscation-workspace.html"
+    assert page.status_code == 200
+    assert "<title>Blot</title>" in page.text
+
+
+def test_encrypted_state_hides_terms_and_detects_tampering():
+    key = b"K" * 32
+    state = {"name": "Cedar Planning", "mapping": {"T_001": "Alex Tan"}}
+    encrypted = encrypt_state("project-123", state, key)
+
+    assert b"Cedar Planning" not in encrypted
+    assert b"Alex Tan" not in encrypted
+    assert decrypt_state("project-123", encrypted, key) == state
+    with pytest.raises(EncryptedStateError):
+        decrypt_state("other-project", encrypted, key)
+
+
+def test_project_create_open_and_encrypted_sidecar(tmp_path):
+    root = tmp_path / "Cedar briefing"
+    root.mkdir()
+    key_store = MemoryKeyStore()
+    service = ProjectService(key_store)
+
+    created = service.create(root, "Cedar briefing")
+    state_file = root / ".blot" / "private-state.enc"
+    manifest = (root / ".blot" / "project.json").read_text(encoding="utf-8")
+    restored = service.open(root)
+
+    assert created.project_id == restored.project_id
+    assert restored.name == "Cedar briefing"
+    assert "Cedar briefing" not in manifest
+    assert b"Cedar briefing" not in state_file.read_bytes()
+    assert service.load_private_state(root)["mapping"] == {}
+    assert (root / ".blot" / "project.sqlite3").is_file()
+
+
+def test_project_refuses_overwrite_and_relative_or_unwritable_locations(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    service = ProjectService(MemoryKeyStore())
+    service.create(root, "Project")
+
+    with pytest.raises(ProjectError, match="Open it"):
+        service.create(root, "Another project")
+    with pytest.raises(ProjectError, match="absolute"):
+        service.create("relative/path", "Project")
+
+
+def test_project_open_requires_its_os_protected_key(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    ProjectService(MemoryKeyStore()).create(root, "Project")
+
+    with pytest.raises(KeyStoreUnavailable, match="missing test key"):
+        ProjectService(MemoryKeyStore()).open(root)
+
+
+@pytest.mark.anyio
+async def test_project_api_requires_launch_token_and_encrypts_initial_state(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        payload = {"name": "Synthetic Project", "directory": str(root)}
+        denied = await client.post("/api/projects", json=payload)
+        created = await client.post(
+            "/api/projects",
+            json=payload,
+            headers={"X-Local-App-Token": app.state.local_token},
+        )
+
+    assert denied.status_code == 401
+    assert created.status_code == 201
+    assert created.json()["graphProtection"] == "encrypted"
+    assert b"Synthetic Project" not in (root / ".blot" / "private-state.enc").read_bytes()
+
+
+@pytest.mark.anyio
+async def test_native_folder_picker_is_token_protected_and_returns_only_user_selection(tmp_path, monkeypatch):
+    selected = tmp_path / "local project"
+    monkeypatch.setattr(main_module, "pick_project_directory", lambda: selected)
+    app, client_context = local_client(tmp_path)
+    async with client_context as client:
+        denied = await client.get("/api/dialogs/project-folder")
+        accepted = await client.get(
+            "/api/dialogs/project-folder",
+            headers={"X-Local-App-Token": app.state.local_token},
+        )
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json() == {"cancelled": False, "directory": str(selected)}
