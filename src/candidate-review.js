@@ -1,7 +1,5 @@
 export function getVisibleCandidates(candidates, level) {
-  return candidates.filter((candidate) => (
-    candidate.level >= level || candidate.decision !== 'suggested'
-  ));
+  return candidates.filter((candidate) => candidate.level > level);
 }
 
 export function getCandidateDecisionCounts(candidates) {
@@ -11,8 +9,6 @@ export function getCandidateDecisionCounts(candidates) {
   }, { suggested: 0, included: 0, excluded: 0 });
 }
 
-export function getSuggestedBelowSensitivityCount(candidates, level) {
-  return candidates.filter((candidate) => (
-    candidate.level < level && candidate.decision === 'suggested'
-  )).length;
+export function getCandidatesAtOrBelowPriority(candidates, level) {
+  return candidates.filter((candidate) => candidate.level <= level).length;
 }

@@ -140,12 +140,15 @@
     .view-switch button { border: 0; border-right: 1px solid var(--border); background: var(--bg); color: var(--muted); min-height: 32px; padding: 0 10px; font-size: 12px; }
     .view-switch button:last-child { border-right: 0; }
     .view-switch button.active { background: var(--surface); color: var(--fg); font-weight: 700; }
-    .slider-area { padding: 16px; background: var(--surface); border-bottom: 1px solid var(--border-soft); }
-    .slider-labels { display: flex; justify-content: space-between; align-items: baseline; }
-    .slider-labels label { font-weight: 700; font-size: 13px; }
-    .slider-value { color: var(--accent); font: 700 13px var(--font-mono); }
-    input[type=range] { width: 100%; accent-color: var(--accent); margin: 12px 0 2px; }
-    .range-notes { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+    .priority-area { padding: 16px; background: var(--surface); border-bottom: 1px solid var(--border-soft); }
+    .priority-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+    .priority-fieldset legend { padding: 0; font-weight: 700; font-size: 13px; }
+    .priority-options { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 12px; }
+    .priority-choice { min-height: 34px; display: flex; justify-content: center; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--muted); font: 12px var(--font-mono); cursor: pointer; }
+    .priority-choice input { accent-color: var(--accent); margin: 0; }
+    .priority-choice.selected { border-color: var(--accent); color: var(--fg); background: color-mix(in oklch, var(--accent) 8%, var(--bg)); }
+    .priority-choice:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .priority-help { margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
     .preview { padding: 22px 26px 30px; min-height: 430px; }
     .preview-note { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-bottom: 18px; }
     .preview-note .status-dot { width: 7px; height: 7px; }
@@ -255,7 +258,9 @@
           </aside>
           <section class="panel review-panel" data-od-id="review-panel">
             <div class="review-toolbar"><div class="review-title"><strong>board-update.docx</strong><span>Editable text view · 2 pages · 1,842 words</span></div><div class="view-switch" role="tablist"><button class="active" data-view="preview" data-od-id="view-preview">Preview</button><button data-view="changes" data-od-id="view-changes">Changes <span id="change-count">3</span></button></div></div>
-            <div class="slider-area" data-od-id="sensitivity-slider-panel"><div class="slider-labels"><label for="sensitivity">Candidate breadth</label><span class="slider-value">Level <span id="level-value">5</span> / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value="5" data-od-id="sensitivity-slider" /><div class="range-notes"><span>Narrow · high confidence</span><span>All detected candidates</span></div></div>
+             <div class="priority-area" data-od-id="priority-cutoff-panel"><fieldset class="priority-fieldset"><legend>Exclude priority and below</legend><div class="priority-options">
+               <label class="priority-choice"><input type="radio" name="sensitivity" value="1" /><span>1</span></label><label class="priority-choice"><input type="radio" name="sensitivity" value="2" /><span>2</span></label><label class="priority-choice"><input type="radio" name="sensitivity" value="3" /><span>3</span></label><label class="priority-choice"><input type="radio" name="sensitivity" value="4" /><span>4</span></label><label class="priority-choice selected"><input type="radio" name="sensitivity" value="5" checked /><span>5</span></label><label class="priority-choice"><input type="radio" name="sensitivity" value="6" /><span>6</span></label><label class="priority-choice"><input type="radio" name="sensitivity" value="7" /><span>7</span></label><label class="priority-choice"><input type="radio" name="sensitivity" value="8" /><span>8</span></label><label class="priority-choice"><input type="radio" name="sensitivity" value="9" /><span>9</span></label><label class="priority-choice"><input type="radio" name="sensitivity" value="10" /><span>10</span></label>
+             </div><p class="priority-help">At 10, priorities 1–10 are all excluded, so nothing will be obfuscated.</p></fieldset></div>
             <div class="preview" id="preview-pane" data-od-id="document-preview">
               <div class="preview-note"><span class="status-dot"></span><span id="preview-status">3 suggested groups are visible at this level. Click a highlighted term to decide.</span></div>
               <article class="doc-page"><div class="doc-kicker">BOARD UPDATE · 04 OCTOBER 2026</div><h2 data-od-id="document-heading">Project Cedar: Q4 operating brief</h2><p><span class="term auto" data-term="alex" data-od-id="term-alex">Alex Tan</span> will brief the board on <span class="term auto" data-term="cedar" data-od-id="term-cedar">Project Cedar</span> at the Tuesday session. The working team has moved the launch window to the second week of November.</p><p>The current owner is <span class="term auto" data-term="alex" data-od-id="term-alias">A. Tan</span>. Please keep the Cedar reference out of external notes until the partner review is complete. Finance has approved the revised operating envelope.</p><p class="obfuscated-copy" style="display:none;"><span class="token">[[T_001]]</span> will brief the board on <span class="token">[[T_002]]</span> at the Tuesday session. The working team has moved the launch window to the second week of November.</p><div class="legend"><span class="legend-item"><span class="legend-swatch"></span>Suggested</span><span class="legend-item"><span class="legend-swatch manual"></span>Manual decision</span><span class="legend-item">Click a term to inspect its group</span></div></article>
@@ -289,16 +294,15 @@
          try { localStorage.setItem('blot-theme', dark ? 'dark' : 'light'); } catch (e) {}
          if (announce) showToast(dark ? 'Dark mode enabled locally' : 'Light mode enabled locally');
        }
-      function refreshPreview() {
-        var level = Number(document.getElementById('sensitivity').value);
-        state.level = level;
-        document.getElementById('level-value').textContent = level;
-        document.getElementById('foot-level').textContent = level;
-        var count = level < 3 ? 2 : level < 7 ? 3 : 4;
-        document.getElementById('match-count').textContent = count;
-        document.getElementById('change-count').textContent = count;
-        document.getElementById('preview-status').textContent = count + ' suggested occurrences are visible at this level. Click a highlighted term to decide.';
-        document.querySelectorAll('.term.auto').forEach(function (term) { term.style.opacity = level < 3 && term.dataset.term === 'cedar' ? '.38' : '1'; });
+       function refreshPreview() {
+         var level = Number(document.querySelector('input[name="sensitivity"]:checked').value);
+         state.level = level;
+         document.getElementById('foot-level').textContent = level;
+         var count = level < 3 ? 3 : level < 7 ? 2 : 0;
+         document.getElementById('match-count').textContent = count;
+         document.getElementById('change-count').textContent = count;
+         document.getElementById('preview-status').textContent = level === 10 ? 'All priorities are excluded; nothing will be obfuscated.' : count + ' suggested occurrences are above priority ' + level + '. Click a highlighted term to decide.';
+         document.querySelectorAll('.term.auto').forEach(function (term) { term.style.opacity = level === 10 ? '.38' : '1'; });
          try { localStorage.setItem('blot-level', String(level)); } catch (e) {}
       }
       function applyDecision(group, decision) {
@@ -309,7 +313,7 @@
         showToast(label + ' ' + (group === 'alex' ? 'Alex Tan group' : 'Project Cedar group') + ' across this document');
       }
       function openModal(open) { document.getElementById('modal-backdrop').classList.toggle('open', open); }
-       document.getElementById('sensitivity').addEventListener('input', refreshPreview);
+        document.querySelectorAll('input[name="sensitivity"]').forEach(function (input) { input.addEventListener('change', refreshPreview); });
        document.getElementById('theme-toggle').addEventListener('click', function () { setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true); });
       document.querySelectorAll('[data-decision]').forEach(function (button) { button.addEventListener('click', function () { applyDecision(button.dataset.group, button.dataset.decision === 'include' ? 'included' : 'excluded'); }); });
       document.querySelectorAll('.term').forEach(function (term) { term.addEventListener('click', function () { var next = state.decisions[term.dataset.term] === 'included' ? 'excluded' : 'included'; applyDecision(term.dataset.term, next); }); });

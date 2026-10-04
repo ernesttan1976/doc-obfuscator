@@ -592,6 +592,11 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
         denied = await client.post("/api/projects/export-preview", json={**request, "level": 1})
         preview_response = await client.post(
             "/api/projects/export-preview",
+            json={**request, "level": 3},
+            headers=headers,
+        )
+        all_excluded = await client.post(
+            "/api/projects/export-preview",
             json={**request, "level": 10},
             headers=headers,
         )
@@ -625,12 +630,14 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
 
     assert denied.status_code == 401
     assert preview_response.status_code == 200
+    assert all_excluded.status_code == 400
+    assert "No candidates have priority above this cutoff" in all_excluded.json()["detail"]
     assert preview["requiresAcknowledgement"] is True
     assert preview["preexistingPlaceholderCount"] == 1
-    assert len(preview["matches"]) == 1
-    assert [match["term"] for match in preview["matches"]] == ["Alex Tan"]
+    assert len(preview["matches"]) == 2
+    assert {match["term"] for match in preview["matches"]} == {"Alex Tan", "Project Cedar"}
     assert any(match["term"] == "Project Cedar" for match in broad_preview["matches"])
-    assert preview["matches"][0]["term"] == "Alex Tan"
+    assert all(match["term"] != "alex@example.test" for match in preview["matches"])
     assert preview["preview"]["text"].startswith("[[T_")
     assert unacknowledged.status_code == 409
     assert exported.status_code == 200
