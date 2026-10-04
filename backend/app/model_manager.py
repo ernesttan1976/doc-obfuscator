@@ -4,13 +4,17 @@ import hashlib
 import importlib.util
 import json
 import os
-import shutil
 import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
-from urllib.request import urlopen
+
+from .pinned_download import (
+    DownloadCancelled,
+    partial_download_size,
+    resumable_download,
+    urlopen,
+)
 
 MODEL_ID = "knowledgator/gliner-multitask-large-v0.5"
 MODEL_REVISION = "7a95e168036db9ec6f914c0cc6b218edbd87f310"
@@ -111,11 +115,12 @@ class LocalModelManager:
             if self.model_directory.exists():
                 raise ModelManagerError("An incomplete model directory exists; remove or move it before retrying.")
             job_id = str(uuid.uuid4())
+            partial_directory = self.model_directory.parent / f".{self.model_directory.name}.partial"
             self._cancel.clear()
             self._job = {
                 "jobId": job_id,
                 "status": "downloading",
-                "downloadedBytes": 0,
+                "downloadedBytes": partial_download_size(MODEL_FILES, partial_directory),
                 "totalBytes": MODEL_SIZE_BYTES,
                 "error": None,
             }
@@ -132,19 +137,23 @@ class LocalModelManager:
 
     def _download_worker(self, job_id: str) -> None:
         install_parent = self.model_directory.parent
-        temporary_directory = install_parent / f".{self.model_directory.name}.{job_id}.partial"
+        temporary_directory = install_parent / f".{self.model_directory.name}.partial"
         try:
-            temporary_directory.mkdir(parents=True, mode=0o700)
-            downloaded = 0
-            for model_file in MODEL_FILES:
-                if self._cancel.is_set():
-                    raise _DownloadCancelled
-                target = temporary_directory / model_file.name
-                url = f"https://huggingface.co/{MODEL_ID}/resolve/{MODEL_REVISION}/{model_file.name}"
-                with urlopen(url, timeout=30) as response, target.open("xb") as destination:
-                    downloaded += self._copy_and_verify(response, destination, model_file, downloaded, job_id)
+            def update_progress(downloaded: int) -> None:
+                with self._lock:
+                    if self._job.get("jobId") == job_id:
+                        self._job["downloadedBytes"] = downloaded
+
+            resumable_download(
+                MODEL_FILES,
+                temporary_directory,
+                lambda artifact: f"https://huggingface.co/{MODEL_ID}/resolve/{MODEL_REVISION}/{artifact.name}",
+                self._cancel,
+                update_progress,
+                opener=urlopen,
+            )
             if self._cancel.is_set():
-                raise _DownloadCancelled
+                raise DownloadCancelled
             manifest = {
                 "modelId": MODEL_ID,
                 "revision": MODEL_REVISION,
@@ -162,55 +171,23 @@ class LocalModelManager:
             with self._lock:
                 if self._job.get("jobId") == job_id:
                     self._job = {"jobId": job_id, "status": "ready", "downloadedBytes": MODEL_SIZE_BYTES}
-        except _DownloadCancelled:
-            shutil.rmtree(temporary_directory, ignore_errors=True)
+        except DownloadCancelled:
             with self._lock:
                 if self._job.get("jobId") == job_id:
-                    self._job = {"jobId": job_id, "status": "cancelled", "downloadedBytes": 0}
+                    self._job = {
+                        "jobId": job_id,
+                        "status": "cancelled",
+                        "downloadedBytes": partial_download_size(MODEL_FILES, temporary_directory),
+                    }
         except Exception:  # noqa: BLE001 - never expose remote or parser exception details to the UI
-            shutil.rmtree(temporary_directory, ignore_errors=True)
             with self._lock:
                 if self._job.get("jobId") == job_id:
                     self._job = {
                         "jobId": job_id,
                         "status": "failed",
-                        "downloadedBytes": 0,
+                        "downloadedBytes": partial_download_size(MODEL_FILES, temporary_directory),
                         "error": "Download failed or an artifact did not match its pinned integrity check.",
                     }
-
-    def _copy_and_verify(
-        self,
-        response: BinaryIO,
-        destination: BinaryIO,
-        model_file: ModelFile,
-        previous_downloaded: int,
-        job_id: str,
-    ) -> int:
-        sha256 = hashlib.sha256()
-        git_sha1 = hashlib.sha1(f"blob {model_file.size}\0".encode())
-        received = 0
-        while True:
-            if self._cancel.is_set():
-                raise _DownloadCancelled
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            received += len(chunk)
-            if received > model_file.size:
-                raise ModelManagerError("Downloaded artifact exceeded its pinned size.")
-            sha256.update(chunk)
-            git_sha1.update(chunk)
-            destination.write(chunk)
-            with self._lock:
-                if self._job.get("jobId") == job_id:
-                    self._job["downloadedBytes"] = previous_downloaded + received
-        if received != model_file.size:
-            raise ModelManagerError("Downloaded artifact size did not match its pinned size.")
-        if model_file.sha256 and sha256.hexdigest() != model_file.sha256:
-            raise ModelManagerError("Downloaded artifact did not match its pinned SHA-256 digest.")
-        if model_file.git_sha1 and git_sha1.hexdigest() != model_file.git_sha1:
-            raise ModelManagerError("Downloaded artifact did not match its pinned Git blob digest.")
-        return received
 
     def _installed_manifest_is_valid(self) -> bool:
         manifest_path = self.model_directory / "blot-model-manifest.json"
@@ -299,8 +276,6 @@ class LocalModelManager:
             self._verified = True
 
 
-class _DownloadCancelled(Exception):
-    pass
 
 
 def _text_chunks(text: str) -> list[tuple[str, int]]:

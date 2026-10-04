@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -34,13 +35,24 @@ from .document_adapters import (
 from .key_store import KeyStoreUnavailable, ProjectKeyStore
 from .local_crypto import atomic_write_private, decrypt_state, encrypt_state
 from .model_manager import ModelManagerError
+from .portable_backup import (
+    PortableBackupError,
+    build_archive,
+    decrypt_backup,
+    encrypt_backup,
+    read_archive,
+)
 
 MANIFEST_NAME = "project.json"
 DATABASE_NAME = "project.sqlite3"
 STATE_NAME = "private-state.enc"
 STATE_VERSION = 1
 MAX_DOCUMENT_BYTES = 100 * 1024 * 1024
+MAX_PENDING_RESTORE_PLANS = 5
 SUPPORTED_DOCUMENT_EXTENSIONS = {".docx", ".pptx", ".txt", ".md", ".csv", ".xlsx"}
+TOKEN_LIKE_TEXT = re.compile(r"\[\[T_[^\]\r\n]{1,128}\]\]", re.IGNORECASE)
+VALID_PLACEHOLDER = re.compile(r"\[\[T_[A-Za-z0-9_-]{3,}\]\]", re.IGNORECASE)
+MAX_RESTORE_REPORT_TOKENS = 500
 
 
 class ProjectError(Exception):
@@ -95,6 +107,8 @@ class ProjectService:
         self.contextual_proposer = contextual_proposer
         self._export_plans: dict[str, dict[str, Any]] = {}
         self._export_lock = threading.RLock()
+        self._restore_plans: dict[str, dict[str, Any]] = {}
+        self._restore_lock = threading.RLock()
 
     def create(self, directory: str | Path, name: str) -> ProjectSummary:
         root = self._validate_directory(directory)
@@ -199,8 +213,12 @@ class ProjectService:
         version_id: str | None = None,
     ) -> dict[str, object]:
         root = self._validate_directory(directory)
-        parsed, _, _, _, _, _, _ = self._read_document_version(root, document_id, version_id)
-        return parsed.to_public_dict()
+        parsed, resolved_version_id, _, _, _, _, _ = self._read_document_version(root, document_id, version_id)
+        preview = parsed.to_public_dict()
+        report = self.load_private_state(root).get("restoreReports", {}).get(resolved_version_id)
+        if report:
+            preview["restoreReport"] = report
+        return preview
 
     def preview_obfuscation(
         self,
@@ -486,10 +504,398 @@ class ProjectService:
         _, _, _, path, kind, extension, display_name = self._read_document_version(
             root, document_id, version_id
         )
-        if kind != "obfuscated":
-            raise ProjectError("Only an approved obfuscated project version can be downloaded for external use.")
+        if kind not in {"obfuscated", "restored"}:
+            raise ProjectError("Only an approved obfuscated or restored project version can be downloaded.")
         version_name = self._version_name(display_name, kind, version_id, extension)
         return path, version_name
+
+    def preview_restoration(
+        self,
+        directory: str | Path,
+        document_id: str,
+        source_version_id: str,
+        returned_path: str | Path,
+    ) -> dict[str, object]:
+        root = self._validate_directory(directory)
+        self.open(root)
+        connection = sqlite3.connect(root / ".blot" / DATABASE_NAME)
+        try:
+            version = connection.execute(
+                "SELECT v.parent_version_id, v.kind, d.extension "
+                "FROM versions AS v JOIN documents AS d ON d.id = v.document_id "
+                "WHERE v.id = ? AND v.document_id = ?",
+                (source_version_id, document_id),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise ProjectError("The selected source version could not be read.") from exc
+        finally:
+            connection.close()
+        if version is None or version[1] != "obfuscated":
+            raise ProjectError("Choose an obfuscated version from this project to restore against.")
+
+        original_version_id, _, extension = version
+        returned_file = Path(returned_path).expanduser()
+        if (
+            str(extension).lower() not in {".docx", ".pptx", ".xlsx"}
+            or not returned_file.is_absolute()
+            or returned_file.suffix.lower() != str(extension).lower()
+        ):
+            raise ProjectError("Choose a returned DOCX, PPTX, or XLSX matching the selected obfuscated version.")
+        try:
+            returned_file = returned_file.resolve(strict=True)
+            if not returned_file.is_file() or returned_file.stat().st_size > MAX_DOCUMENT_BYTES:
+                raise ProjectError("The returned document is missing or exceeds the 100 MB processing limit.")
+            source_bytes = returned_file.read_bytes()
+        except (OSError, RuntimeError) as exc:
+            raise ProjectError("The returned document could not be read.") from exc
+
+        parsed = parse_document(source_bytes, str(extension))
+        state = self.load_private_state(root)
+        eligible_mapping = self._restoration_mapping(state, document_id, str(original_version_id))
+        known_tokens_casefolded = {token.casefold() for token in eligible_mapping}
+        exact_counts: dict[str, int] = {}
+        unresolved_counts: dict[str, dict[str, object]] = {}
+        unresolved_total = altered_total = unknown_or_foreign_total = 0
+        unresolved_truncated = False
+        for block in blocks_for_document(parsed):
+            for match in TOKEN_LIKE_TEXT.finditer(block.text):
+                token = match.group(0)
+                if token in eligible_mapping:
+                    exact_counts[token] = exact_counts.get(token, 0) + 1
+                else:
+                    category = (
+                        "altered"
+                        if token.casefold() in known_tokens_casefolded or not VALID_PLACEHOLDER.fullmatch(token)
+                        else "unknownOrForeign"
+                    )
+                    unresolved_total += 1
+                    if category == "altered":
+                        altered_total += 1
+                    else:
+                        unknown_or_foreign_total += 1
+                    if token in unresolved_counts:
+                        entry = unresolved_counts[token]
+                        entry["count"] = int(entry["count"]) + 1
+                    elif len(unresolved_counts) < MAX_RESTORE_REPORT_TOKENS:
+                        unresolved_counts[token] = {"token": token, "count": 1, "status": category}
+                    else:
+                        unresolved_truncated = True
+
+        replacements = {token: eligible_mapping[token] for token in exact_counts}
+        output_bytes = serialize_with_replacements(parsed, replacements, case_sensitive=True)
+        output = parse_document(output_bytes, str(extension))
+        report = {
+            "restoredCount": sum(exact_counts.values()),
+            "unresolvedTokens": list(unresolved_counts.values()),
+            "unresolvedCount": unresolved_total,
+            "alteredCount": altered_total,
+            "unknownOrForeignCount": unknown_or_foreign_total,
+            "unresolvedTokensTruncated": unresolved_truncated,
+        }
+        plan_id = secrets.token_urlsafe(24)
+        self._prune_restore_plans()
+        while len(self._restore_plans) >= MAX_PENDING_RESTORE_PLANS:
+            oldest = min(
+                self._restore_plans,
+                key=lambda key: float(self._restore_plans[key].get("createdAt", 0)),
+            )
+            self._restore_plans.pop(oldest, None)
+        self._restore_plans[plan_id] = {
+            "createdAt": time.monotonic(),
+            "directory": str(root),
+            "documentId": document_id,
+            "sourceVersionId": source_version_id,
+            "mappingSourceVersionId": str(original_version_id),
+            "mappingFingerprint": self._restoration_mapping_fingerprint(eligible_mapping),
+            "returnedPath": str(returned_file),
+            "sourceHash": hashlib.sha256(source_bytes).hexdigest(),
+            "outputBytes": output_bytes,
+            "report": report,
+        }
+        return {
+            "planId": plan_id,
+            "documentId": document_id,
+            "sourceVersionId": source_version_id,
+            "format": parsed.format,
+            "preview": output.to_public_dict(),
+            "report": report,
+            "outputName": self._version_name(returned_file.name, "restored", plan_id, str(extension)),
+        }
+
+    def commit_restoration(self, directory: str | Path, plan_id: str) -> dict[str, object]:
+        with self._restore_lock:
+            root = self._validate_directory(directory)
+            plan = self._restore_plans.get(plan_id)
+            if (
+                plan is None
+                or plan.get("directory") != str(root)
+                or time.monotonic() - float(plan.get("createdAt", 0)) > 900
+            ):
+                self._restore_plans.pop(plan_id, None)
+                raise ProjectError("This restoration preview expired. Preview the returned document again.")
+            try:
+                current_bytes = Path(str(plan["returnedPath"])).read_bytes()
+            except OSError as exc:
+                raise ProjectError("The returned document is no longer available.") from exc
+            if hashlib.sha256(current_bytes).hexdigest() != plan["sourceHash"]:
+                self._restore_plans.pop(plan_id, None)
+                raise ProjectError("The returned document changed after preview. Review it again before restoring.")
+
+            document_id = str(plan["documentId"])
+            source_version_id = str(plan["sourceVersionId"])
+            state = self.load_private_state(root)
+            current_mapping = self._restoration_mapping(
+                state,
+                document_id,
+                str(plan["mappingSourceVersionId"]),
+            )
+            if self._restoration_mapping_fingerprint(current_mapping) != plan["mappingFingerprint"]:
+                self._restore_plans.pop(plan_id, None)
+                raise ProjectError("The project replacement map changed. Preview the returned document again.")
+            restore_reports = state.setdefault("restoreReports", {})
+            output_version_id = str(uuid.uuid4())
+            extension = Path(str(plan["returnedPath"])).suffix.lower()
+            relative_path = (Path("outputs") / document_id / f"{output_version_id}{extension}").as_posix()
+            output_path = root / ".blot" / relative_path
+            atomic_write_private(output_path, bytes(plan["outputBytes"]))
+            restore_reports[output_version_id] = plan["report"]
+            connection = sqlite3.connect(root / ".blot" / DATABASE_NAME)
+            try:
+                with connection:
+                    connection.execute(
+                        "INSERT INTO versions(id, document_id, parent_version_id, kind, relative_path, status, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            output_version_id,
+                            document_id,
+                            source_version_id,
+                            "restored",
+                            relative_path,
+                            "ready",
+                            datetime.now(UTC).isoformat(),
+                        ),
+                    )
+                self.save_private_state(root, state)
+            except Exception as exc:
+                with suppress(sqlite3.Error):
+                    connection.execute("DELETE FROM versions WHERE id = ?", (output_version_id,))
+                    connection.commit()
+                output_path.unlink(missing_ok=True)
+                restore_reports.pop(output_version_id, None)
+                raise ProjectError("The restored copy could not be committed as a new project version.") from exc
+            finally:
+                connection.close()
+            self._restore_plans.pop(plan_id, None)
+            return {
+                "id": output_version_id,
+                "documentId": document_id,
+                "parentVersionId": source_version_id,
+                "kind": "restored",
+                "status": "ready",
+                "name": self._version_name(Path(str(plan["returnedPath"])).name, "restored", output_version_id, extension),
+                "type": extension.lstrip(".").upper(),
+                "restoreReport": plan["report"],
+            }
+
+    def _prune_restore_plans(self) -> None:
+        cutoff = time.monotonic() - 900
+        for key, plan in tuple(self._restore_plans.items()):
+            if float(plan.get("createdAt", 0)) < cutoff:
+                self._restore_plans.pop(key, None)
+
+    def clear_pending_operations(self) -> None:
+        with self._export_lock:
+            self._export_plans.clear()
+        with self._restore_lock:
+            self._restore_plans.clear()
+
+    @staticmethod
+    def _restoration_mapping(
+        state: dict[str, Any], document_id: str, source_version_id: str
+    ) -> dict[str, str]:
+        return {
+            str(token): str(value["term"])
+            for token, value in state.get("mapping", {}).items()
+            if isinstance(value, dict)
+            and value.get("documentId") == document_id
+            and value.get("sourceVersionId") == source_version_id
+            and isinstance(value.get("term"), str)
+        }
+
+    @staticmethod
+    def _restoration_mapping_fingerprint(mapping: dict[str, str]) -> str:
+        return hashlib.sha256(
+            json.dumps(mapping, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def create_portable_backup(self, directory: str | Path, passphrase: str) -> bytes:
+        root = self._validate_directory(directory)
+        project = self.open(root)
+        private_dir = root / ".blot"
+        connection = sqlite3.connect(private_dir / DATABASE_NAME)
+        try:
+            versions = connection.execute(
+                "SELECT id, document_id, kind, relative_path FROM versions ORDER BY created_at, id"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise ProjectError("Project version metadata could not be read for backup.") from exc
+        finally:
+            connection.close()
+
+        entries: dict[str, bytes] = {
+            "backup.json": json.dumps(
+                {"format": 1, "name": project.name}, separators=(",", ":")
+            ).encode("utf-8"),
+            "project.sqlite3": (private_dir / DATABASE_NAME).read_bytes(),
+            "private-state.json": json.dumps(
+                self.load_private_state(root), ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8"),
+        }
+        for version_id, document_id, kind, relative_path in versions:
+            _, _, _, path, actual_kind, _, _ = self._read_document_version(
+                root, str(document_id), str(version_id)
+            )
+            if actual_kind != kind or Path(relative_path).as_posix() != Path(
+                "originals" if kind == "original" else "outputs"
+            ).joinpath(str(document_id), f"{version_id}{path.suffix}" if kind != "original" else f"original{path.suffix}").as_posix():
+                raise ProjectError("The project contains an invalid document version path and cannot be backed up.")
+            entries[str(relative_path)] = path.read_bytes()
+        try:
+            archive = build_archive(entries)
+            return encrypt_backup(archive, passphrase)
+        except PortableBackupError as exc:
+            raise ProjectError(str(exc)) from exc
+
+    def restore_portable_backup(
+        self,
+        directory: str | Path,
+        backup_path: str | Path,
+        passphrase: str,
+    ) -> ProjectSummary:
+        root = self._validate_directory(directory)
+        private_dir = root / ".blot"
+        if private_dir.exists():
+            raise ProjectError("The selected folder already contains a project; choose an empty folder for backup restore.")
+        selected_backup = Path(backup_path).expanduser()
+        if not selected_backup.is_absolute():
+            raise ProjectError("Choose an absolute path to the encrypted backup file.")
+        try:
+            selected_backup = selected_backup.resolve(strict=True)
+            if not selected_backup.is_file() or selected_backup.stat().st_size > 1024 * 1024 * 1024:
+                raise ProjectError("The encrypted backup is missing or exceeds the 1 GB limit.")
+            archive_bytes = decrypt_backup(selected_backup.read_bytes(), passphrase)
+            entries = read_archive(archive_bytes)
+        except PortableBackupError as exc:
+            raise ProjectError(str(exc)) from exc
+        except (OSError, RuntimeError) as exc:
+            raise ProjectError("The encrypted backup could not be read.") from exc
+
+        try:
+            metadata = json.loads(entries.pop("backup.json"))
+            state = json.loads(entries.pop("private-state.json"))
+            database = entries.pop(DATABASE_NAME)
+            project_name = self._validate_name(metadata["name"])
+            if metadata.get("format") != 1 or not isinstance(state, dict):
+                raise ValueError("invalid backup metadata")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ProjectError("The encrypted backup does not contain a supported project.") from exc
+
+        expected_paths = self._backup_document_paths(database)
+        if expected_paths != set(entries):
+            raise ProjectError("The backup document inventory does not match its project database.")
+        project_id = str(uuid.uuid4())
+        try:
+            private_dir.mkdir(mode=0o700)
+            for relative_path, content in entries.items():
+                self._write_backup_entry(private_dir, relative_path, content)
+            database_path = private_dir / DATABASE_NAME
+            atomic_write_private(database_path, database)
+            connection = sqlite3.connect(database_path)
+            try:
+                check = connection.execute("PRAGMA integrity_check").fetchone()
+                if check is None or check[0] != "ok":
+                    raise ProjectError("The backup project database failed its integrity check.")
+                connection.execute(
+                    "UPDATE project_meta SET value = ? WHERE key = 'project_id'",
+                    (project_id,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            if os.name != "nt":
+                database_path.chmod(0o600)
+            key = self.key_store.get_or_create(project_id)
+            state_path = private_dir / STATE_NAME
+            atomic_write_private(state_path, encrypt_state(project_id, state, key))
+            manifest = {"version": STATE_VERSION, "projectId": project_id}
+            atomic_write_private(
+                private_dir / MANIFEST_NAME,
+                json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
+            )
+            self.open(root)
+        except Exception as exc:
+            with suppress(KeyStoreUnavailable):
+                self.key_store.delete(project_id)
+            self._remove_created_workspace(private_dir)
+            if isinstance(exc, ProjectError):
+                raise
+            raise ProjectError("The encrypted backup could not be restored to this folder.") from exc
+        return ProjectSummary(project_id, project_name, root)
+
+    @staticmethod
+    def _backup_document_paths(database: bytes) -> set[str]:
+        with tempfile.NamedTemporaryFile(prefix="blot-backup-", suffix=".sqlite3") as temporary:
+            temporary.write(database)
+            temporary.flush()
+            connection = sqlite3.connect(temporary.name)
+            try:
+                check = connection.execute("PRAGMA integrity_check").fetchone()
+                if check is None or check[0] != "ok":
+                    raise ProjectError("The backup project database failed its integrity check.")
+                rows = connection.execute(
+                    "SELECT v.kind, v.document_id, v.id, v.relative_path, d.extension "
+                    "FROM versions AS v JOIN documents AS d ON d.id = v.document_id "
+                    "ORDER BY v.document_id, v.id"
+                ).fetchall()
+            except sqlite3.Error as exc:
+                raise ProjectError("The backup project database is invalid.") from exc
+            finally:
+                connection.close()
+        paths: set[str] = set()
+        for kind, document_id, version_id, relative_path, extension in rows:
+            parts = Path(str(relative_path)).parts
+            try:
+                if str(uuid.UUID(str(document_id))) != str(document_id):
+                    raise ValueError("noncanonical document id")
+                if str(uuid.UUID(str(version_id))) != str(version_id):
+                    raise ValueError("noncanonical version id")
+            except ValueError as exc:
+                raise ProjectError("The backup contains an invalid document or version identifier.") from exc
+            expected_root = "originals" if kind == "original" else "outputs" if kind in {"obfuscated", "restored"} else ""
+            expected_name = f"original{extension}" if kind == "original" else f"{version_id}{extension}"
+            if (
+                not expected_root
+                or len(parts) != 3
+                or parts[0] != expected_root
+                or parts[1] != str(document_id)
+                or parts[2] != expected_name
+                or Path(str(relative_path)).suffix != extension
+            ):
+                raise ProjectError("The backup contains an unsafe project version path.")
+            paths.add(Path(*parts).as_posix())
+        return paths
+
+    @staticmethod
+    def _write_backup_entry(private_dir: Path, relative_path: str, content: bytes) -> None:
+        parts = Path(relative_path).parts
+        if len(parts) != 3 or parts[0] not in {"originals", "outputs"}:
+            raise ProjectError("The backup contains an unsafe document path.")
+        directory = private_dir.joinpath(*parts[:2])
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        destination = private_dir.joinpath(*parts)
+        atomic_write_private(destination, content)
+        if parts[0] == "originals" and os.name != "nt":
+            destination.chmod(0o400)
 
     def _scoped_graph(
         self,
@@ -561,7 +967,8 @@ class ProjectService:
         if kind == "original":
             return display_name
         base = Path(display_name).stem
-        return f"{base}.obfuscated-{version_id[:8]}{extension}"
+        label = "restored" if kind == "restored" else "obfuscated"
+        return f"{base}.{label}-{version_id[:8]}{extension}"
 
     def analyze_document_candidates(
         self,
@@ -836,7 +1243,7 @@ class ProjectService:
 
         extension, display_name, stored_version_id, kind, relative_path_value = row
         relative_path = Path(relative_path_value)
-        expected_root = "originals" if kind == "original" else "outputs" if kind == "obfuscated" else ""
+        expected_root = "originals" if kind == "original" else "outputs" if kind in {"obfuscated", "restored"} else ""
         expected_name = f"original{extension}" if kind == "original" else f"{stored_version_id}{extension}"
         if (relative_path.is_absolute() or len(relative_path.parts) != 3
                 or relative_path.parts[0] != expected_root

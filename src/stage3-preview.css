@@ -507,3 +507,38 @@
     max-width: 170px;
   }
 }
+.backup-folder-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.backup-folder-field input {
+  min-width: 0;
+  flex: 1;
+}
+
+.backup-note,
+.restore-report {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.restore-report {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 0;
+}
+
+.restore-report div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.restore-report dd {
+  margin: 0;
+  color: var(--accent-on);
+  font-weight: 600;
+}

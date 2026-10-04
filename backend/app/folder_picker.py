@@ -126,3 +126,44 @@ def pick_document_files() -> list[Path] | None:
     if not paths:
         raise FolderPickerError("The document picker returned an empty selection.")
     return paths
+
+
+def pick_backup_file() -> Path | None:
+    """Open the native picker for one encrypted portable backup."""
+    if sys.platform == "darwin":
+        script = 'POSIX path of (choose file with prompt "Choose an encrypted Blot backup" of type {"blotbackup"})'
+        command = ["/usr/bin/osascript", "-e", script]
+    elif sys.platform == "win32":
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$dialog = New-Object System.Windows.Forms.OpenFileDialog; "
+            "$dialog.Filter = 'Blot encrypted backup (*.blotbackup)|*.blotbackup'; "
+            "$dialog.Multiselect = $false; "
+            "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+            "{ [Console]::WriteLine($dialog.FileName) } else { exit 2 }"
+        )
+        command = ["powershell.exe", "-NoProfile", "-STA", "-Command", script]
+    else:
+        raise FolderPickerError("Native backup selection is supported on macOS and Windows only.")
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FolderPickerError("The native backup picker could not be opened.") from exc
+    if result.returncode in {2} or "User canceled" in result.stderr or "-128" in result.stderr:
+        return None
+    if result.returncode != 0:
+        raise FolderPickerError("The native backup picker failed.")
+    selected = result.stdout.rstrip("\r\n")
+    if not selected:
+        raise FolderPickerError("The backup picker returned an empty selection.")
+    path = Path(selected).expanduser()
+    if path.suffix.lower() != ".blotbackup":
+        raise FolderPickerError("Choose a .blotbackup file.")
+    return path

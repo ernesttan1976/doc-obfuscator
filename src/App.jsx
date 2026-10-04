@@ -110,6 +110,14 @@ export default function App() {
   const [exportPreview, setExportPreview] = useState(null);
   const [exportAcknowledged, setExportAcknowledged] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
+  const [restorePreviewData, setRestorePreviewData] = useState(null);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [backupDialog, setBackupDialog] = useState(null);
+  const [backupPassphrase, setBackupPassphrase] = useState('');
+  const [backupDirectory, setBackupDirectory] = useState('');
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [sessionLocked, setSessionLocked] = useState(false);
+  const [unlockBusy, setUnlockBusy] = useState(false);
   const [manualPhrase, setManualPhrase] = useState('');
   const [mergeGroupIds, setMergeGroupIds] = useState([]);
   const [toast, setToast] = useState('');
@@ -208,6 +216,67 @@ export default function App() {
       window.clearTimeout(timer);
     };
   }, [localToken, nerModelStatus?.status, minilmModelStatus?.status]);
+
+  useEffect(() => {
+    if (!localToken) return undefined;
+    let cancelled = false;
+    const checkSession = async () => {
+      try {
+        const response = await fetch('/api/session', {
+          headers: { 'X-Local-App-Token': localToken },
+          cache: 'no-store',
+        });
+        if (response.status === 423 && !cancelled) {
+          setSessionLocked(true);
+          setCurrentProject(null);
+          setFiles([]);
+          setExportPreview(null);
+          setRestorePreviewData(null);
+          setBackupDialog(null);
+          setBackupPassphrase('');
+        }
+      } catch { /* The local-service banner reports availability separately. */ }
+    };
+    void checkSession();
+    const timer = window.setInterval(checkSession, 30_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [localToken]);
+
+  useEffect(() => {
+    if (!currentProject || !localToken || sessionLocked) return undefined;
+    let idleTimer;
+    let lastHeartbeat = 0;
+    const lockSession = () => {
+      setSessionLocked(true);
+      setCurrentProject(null);
+      setFiles([]);
+      setExportPreview(null);
+      setRestorePreviewData(null);
+      setBackupDialog(null);
+      setBackupPassphrase('');
+      setToast('The local workspace locked after 15 minutes without activity. Reopen it through the OS credential store.');
+    };
+    const recordActivity = () => {
+      window.clearTimeout(idleTimer);
+      idleTimer = window.setTimeout(lockSession, 15 * 60 * 1000);
+      if (Date.now() - lastHeartbeat > 60_000) {
+        lastHeartbeat = Date.now();
+        void fetch('/api/session/activity', {
+          method: 'POST',
+          headers: { 'X-Local-App-Token': localToken },
+        }).then((response) => {
+          if (response.status === 423) lockSession();
+        }).catch(() => {});
+      }
+    };
+    const activityEvents = ['pointerdown', 'pointermove', 'keydown', 'touchstart'];
+    activityEvents.forEach((name) => window.addEventListener(name, recordActivity, { passive: true }));
+    recordActivity();
+    return () => {
+      window.clearTimeout(idleTimer);
+      activityEvents.forEach((name) => window.removeEventListener(name, recordActivity));
+    };
+  }, [currentProject?.id, localToken, sessionLocked]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -420,7 +489,12 @@ export default function App() {
             previewLoaded: true,
             previewLoading: false,
             selectedVersionId,
-            status: selectedVersion?.kind === 'obfuscated' ? 'Obfuscated copy · original unchanged' : 'Parsed preview · original unchanged',
+            status: selectedVersion?.kind === 'obfuscated'
+              ? 'Obfuscated copy · original unchanged'
+              : selectedVersion?.kind === 'restored'
+                ? 'Restored copy · originals unchanged'
+                : 'Parsed preview · original unchanged',
+            restoreReport: data.restoreReport || null,
           }
           : file
       )));
@@ -450,6 +524,7 @@ export default function App() {
     const version = activeFile.versions?.find((item) => item.id === versionId);
     if (!version || version.id === activeFile.selectedVersionId) return;
     setExportPreview(null);
+    setRestorePreviewData(null);
     setUndo(null);
     setSectionIndex(0);
     setDenseText(false);
@@ -748,9 +823,159 @@ export default function App() {
     setToast(`Obfuscated text copy downloaded · ${map.size} private replacement${map.size === 1 ? '' : 's'} kept in this session`);
   };
 
-  const restorePreview = () => setToast(currentProject
-    ? 'Restoration is not yet connected to saved project documents.'
-    : 'Restoration requires the local DOCX/PPTX document engine; no file was changed.');
+  const previewProjectRestoration = async () => {
+    if (!currentProject || !activeFile.isProjectDocument || activeVersion.kind !== 'obfuscated' || !localToken) {
+      setToast('Select an obfuscated DOCX, PPTX, or XLSX version in an open project first.');
+      return;
+    }
+    setRestoreBusy(true);
+    try {
+      const pickerResponse = await fetch('/api/dialogs/document-files', {
+        headers: { 'X-Local-App-Token': localToken },
+        cache: 'no-store',
+      });
+      const selection = await pickerResponse.json();
+      if (!pickerResponse.ok) throw new Error(selection.detail || 'Could not open the document picker');
+      if (selection.cancelled || !selection.files?.length) return;
+      const response = await fetch('/api/projects/restore-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({
+          directory: projectDirectory,
+          document_id: activeFile.id,
+          source_version_id: activeVersion.id,
+          returned_path: selection.files[0],
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not prepare the restoration preview');
+      setRestorePreviewData(data);
+    } catch (error) {
+      setToast(error.message || 'Could not prepare the restoration preview');
+    } finally {
+      setRestoreBusy(false);
+    }
+  };
+
+  const commitProjectRestoration = async () => {
+    if (!restorePreviewData || restoreBusy) return;
+    setRestoreBusy(true);
+    try {
+      const response = await fetch('/api/projects/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: projectDirectory, plan_id: restorePreviewData.planId }),
+      });
+      const version = await response.json();
+      if (!response.ok) throw new Error(version.detail || 'Could not save the restored version');
+      setFiles((current) => current.map((file) => (
+        file.id === activeFile.id
+          ? { ...file, versions: [...(file.versions || []), version], selectedVersionId: version.id, status: 'Restored copy saved · originals unchanged' }
+          : file
+      )));
+      setRestorePreviewData(null);
+      setUndo(null);
+      setSectionIndex(0);
+      await loadProjectDocumentPreview(activeFile.id, version.id, 'restored');
+      setToast(`Restored ${version.restoreReport.restoredCount} exact placeholder occurrence${version.restoreReport.restoredCount === 1 ? '' : 's'}; ${version.restoreReport.unresolvedCount} unresolved remain.`);
+    } catch (error) {
+      setToast(error.message || 'Could not save the restored version');
+    } finally {
+      setRestoreBusy(false);
+    }
+  };
+
+  const createPortableBackup = async (event) => {
+    event.preventDefault();
+    if (!currentProject || !backupPassphrase || !localToken) return;
+    setBackupBusy(true);
+    try {
+      const response = await fetch('/api/projects/backup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: projectDirectory, passphrase: backupPassphrase }),
+      });
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Could not create the encrypted backup');
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${currentProject.name.replace(/[^a-z0-9_-]+/gi, '-')}.blotbackup`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setBackupDialog(null);
+      setBackupPassphrase('');
+      setToast('Encrypted portable backup downloaded. Keep its passphrase separately.');
+    } catch (error) {
+      setToast(error.message || 'Could not create the encrypted backup');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const chooseBackupDirectory = async () => {
+    try {
+      const response = await fetch('/api/dialogs/project-folder', {
+        headers: { 'X-Local-App-Token': localToken },
+        cache: 'no-store',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not choose a destination folder');
+      if (!data.cancelled) setBackupDirectory(data.directory);
+    } catch (error) {
+      setToast(error.message || 'Could not choose a destination folder');
+    }
+  };
+
+  const restorePortableBackup = async (event) => {
+    event.preventDefault();
+    if (!backupDirectory || !backupPassphrase || !localToken) return;
+    setBackupBusy(true);
+    try {
+      const backupPicker = await fetch('/api/dialogs/backup-file', {
+        headers: { 'X-Local-App-Token': localToken },
+        cache: 'no-store',
+      });
+      const selection = await backupPicker.json();
+      if (!backupPicker.ok) throw new Error(selection.detail || 'Could not choose a backup file');
+      if (selection.cancelled) return;
+      const response = await fetch('/api/projects/backup/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: backupDirectory, backup_path: selection.path, passphrase: backupPassphrase }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not restore the encrypted backup');
+      const restoredDocuments = (data.documents || []).map((document) => ({
+        id: document.id,
+        versionId: document.versionId,
+        versions: document.versions || [],
+        selectedVersionId: document.versionId,
+        name: document.name,
+        type: document.type,
+        status: 'Restored project document',
+        content: ['Loading a local parsed preview…'],
+        rawText: '',
+        heading: `${document.name} · restored project`,
+        isProjectDocument: true,
+      }));
+      setCurrentProject(data);
+      setProjectDirectory(backupDirectory);
+      setFiles(restoredDocuments);
+      setActiveName(restoredDocuments[0]?.id || '');
+      setSectionIndex(0);
+      setBackupDialog(null);
+      setBackupPassphrase('');
+      if (restoredDocuments[0]) await loadProjectDocumentPreview(restoredDocuments[0].id);
+      setToast(`Restored encrypted project “${data.name}” to this computer`);
+    } catch (error) {
+      setToast(error.message || 'Could not restore the encrypted backup');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
 
   const chooseProjectDirectory = async () => {
     if (!localToken) {
@@ -816,6 +1041,54 @@ export default function App() {
       setToast(error.message || 'Could not open this project');
     } finally {
       setProjectBusy(false);
+    }
+  };
+
+  const unlockProjectSession = async () => {
+    if (!projectDirectory || !localToken) {
+      setProjectModalOpen(true);
+      setProjectAction('open');
+      return;
+    }
+    setUnlockBusy(true);
+    try {
+      const response = await fetch('/api/session/unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: projectDirectory }),
+      });
+      const unlock = await response.json();
+      if (!response.ok) throw new Error(unlock.detail || 'Could not unlock the local project');
+      const projectResponse = await fetch('/api/projects/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({ directory: projectDirectory }),
+      });
+      const data = await projectResponse.json();
+      if (!projectResponse.ok) throw new Error(data.detail || 'Could not reopen the local project');
+      const savedDocuments = (data.documents || []).map((document) => ({
+        id: document.id,
+        versionId: document.versionId,
+        versions: document.versions || [],
+        selectedVersionId: document.versionId,
+        name: document.name,
+        type: document.type,
+        status: 'Saved project document',
+        content: ['Loading a local parsed preview…'],
+        rawText: '',
+        heading: `${document.name} · saved project`,
+        isProjectDocument: true,
+      }));
+      setCurrentProject(data);
+      setFiles(savedDocuments);
+      setActiveName(savedDocuments[0]?.id || '');
+      setSessionLocked(false);
+      if (savedDocuments[0]) await loadProjectDocumentPreview(savedDocuments[0].id);
+      setToast('Local project reopened through the operating-system credential store.');
+    } catch (error) {
+      setToast(error.message || 'Could not unlock the local project');
+    } finally {
+      setUnlockBusy(false);
     }
   };
 
@@ -891,14 +1164,14 @@ export default function App() {
         <div className="side-spacer" /><div className="local-badge"><span className="status-dot" style={{ background: serviceAvailable ? 'var(--success)' : 'var(--warn)' }} /><span><strong style={{ color: 'var(--accent-on)' }}>{serviceAvailable ? 'Local service ready' : 'UI preview mode'}</strong><br />{serviceAvailable ? 'Document content stays on this computer.' : 'Start FastAPI for local projects.'}</span></div>
       </aside>
       <main className="main">
-        <header className="topbar"><div className="crumbs"><span>{currentProject?.name || 'Cedar briefing · demo'}</span><span>/</span><strong>{projectHasNoDocuments ? 'No documents' : activeFile.name}</strong></div><div className="top-actions"><button className="text-btn" onClick={() => setToast('Encrypted backup is planned for release hardening')}>Encrypted backup</button><button className="icon-btn" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀' : '☾'}</button><button className="icon-btn" aria-label="Open local settings" onClick={() => setToast('Local settings are available in the service configuration')}>•••</button><button className="primary-btn" disabled={currentProject && projectBusy} onClick={() => currentProject ? importProjectDocuments() : setModalOpen(true)}>{projectBusy ? 'Working…' : 'Import file'}</button></div></header>
+        <header className="topbar"><div className="crumbs"><span>{currentProject?.name || 'Cedar briefing · demo'}</span><span>/</span><strong>{projectHasNoDocuments ? 'No documents' : activeFile.name}</strong></div><div className="top-actions"><button className="text-btn" onClick={() => { setBackupDialog(currentProject ? 'create' : 'restore'); setBackupPassphrase(''); }}>Encrypted backup</button><button className="icon-btn" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀' : '☾'}</button><button className="icon-btn" aria-label="Open local settings" onClick={() => setToast('Local settings are available in the service configuration')}>•••</button><button className="primary-btn" disabled={currentProject && projectBusy} onClick={() => currentProject ? importProjectDocuments() : setModalOpen(true)}>{projectBusy ? 'Working…' : 'Import file'}</button></div></header>
         <div className="workspace" data-empty-project={projectHasNoDocuments ? 'true' : undefined}>
           {projectHasNoDocuments && <section className="panel empty-project-message"><span className="eyebrow">LOCAL PROJECT · READY</span><h1>Add a document to begin</h1><p>Choose a local document to review its supported editable text. Originals stay unchanged; exports are saved as separate project versions.</p><button className="primary-btn" type="button" onClick={importProjectDocuments} disabled={projectBusy}>{projectBusy ? 'Working…' : 'Import documents'}</button></section>}
-          <div className="page-head"><div><p className="eyebrow">{activeFile.isProjectDocument ? (activeFile.previewError ? 'Saved original · preview unavailable' : `${activeVersion.kind === 'original' ? 'Original' : 'Obfuscated version'} · local parsed preview`) : 'Document review · version 03'}</p><h1>{activeFile.isProjectDocument ? (activeFile.previewError ? 'Preview unavailable' : 'Document review') : 'Prepare a safe copy'}</h1><p className="subhead">{activeFile.isProjectDocument ? (activeFile.previewError ? 'This saved version could not be parsed. The original remains unchanged.' : 'Review candidate decisions in supported editable text. Project versions remain local.') : 'Review suggested terms before this editable-text document leaves your computer. Similarity is a prompt, never a decision.'}</p></div><button className="primary-btn" disabled={!reviewableProjectDocument || exportBusy} onClick={exportCopy}>{exportBusy ? 'Preparing…' : 'Preview & export obfuscated copy'}</button></div>
+           <div className="page-head"><div><p className="eyebrow">{activeFile.isProjectDocument ? (activeFile.previewError ? 'Saved original · preview unavailable' : `${activeVersion.kind === 'original' ? 'Original' : activeVersion.kind === 'restored' ? 'Restored version' : 'Obfuscated version'} · local parsed preview`) : 'Document review · version 03'}</p><h1>{activeFile.isProjectDocument ? (activeFile.previewError ? 'Preview unavailable' : 'Document review') : 'Prepare a safe copy'}</h1><p className="subhead">{activeFile.isProjectDocument ? (activeFile.previewError ? 'This saved version could not be parsed. The original remains unchanged.' : 'Review candidate decisions in supported editable text. Project versions remain local.') : 'Review suggested terms before this editable-text document leaves your computer. Similarity is a prompt, never a decision.'}</p></div><button className="primary-btn" disabled={!reviewableProjectDocument || exportBusy} onClick={exportCopy}>{exportBusy ? 'Preparing…' : 'Preview & export obfuscated copy'}</button></div>
           <section className="layout">
             <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${projectDocuments.length} saved` : `${files.length} items`}</span></div><div className="file-list">{(currentProject ? projectDocuments : files).map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span><span className="file-name">{file.name}</span><span className="file-status">{file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : ''}</span></button>)}{currentProject && projectDocuments.length === 0 && <p className="empty-file-list">No project documents yet.</p>}</div></aside>
             <section className="panel review-panel">
-              <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? `${activeVersion.kind === 'original' ? 'Saved original' : 'Obfuscated copy'} · local preview` : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="review-toolbar-actions">{activeFile.isProjectDocument && <label className="version-select">Version<select aria-label="Select document version" value={activeFile.selectedVersionId || activeFile.versionId} onChange={(event) => selectProjectVersion(event.target.value)}>{(activeFile.versions || []).map((version) => <option key={version.id} value={version.id}>{version.kind === 'original' ? 'Original' : 'Obfuscated'} · {version.name}</option>)}</select></label>}<div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div></div>
+               <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? `${activeVersion.kind === 'original' ? 'Saved original' : activeVersion.kind === 'restored' ? 'Restored copy' : 'Obfuscated copy'} · local preview` : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="review-toolbar-actions">{activeFile.isProjectDocument && <label className="version-select">Version<select aria-label="Select document version" value={activeFile.selectedVersionId || activeFile.versionId} onChange={(event) => selectProjectVersion(event.target.value)}>{(activeFile.versions || []).map((version) => <option key={version.id} value={version.id}>{version.kind === 'original' ? 'Original' : version.kind === 'restored' ? 'Restored' : 'Obfuscated'} · {version.name}</option>)}</select></label>}<div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div></div>
               {reviewableProjectDocument && <div className="slider-area"><div className="slider-labels"><label htmlFor="sensitivity">Candidate breadth</label><span className="slider-value">Level {level} / 10</span></div><input id="sensitivity" type="range" min="1" max="10" value={level} aria-valuetext={`Level ${level} of 10 candidate breadth`} onChange={(event) => { setExportPreview(null); setLevel(Number(event.target.value)); }} /><div className="range-notes"><span>Narrow · fewer candidate types</span><span>All detected candidates</span></div></div>}
               {view === 'preview' ? <div className="preview"><div className="preview-note"><span className="status-dot" /><span>{activeFile.isProjectDocument ? (activeFile.candidateLoading ? 'Scanning supported editable text locally…' : `${visibleCandidates.length} candidates shown at level ${level}. Review decisions below; only supported editable text is scanned.`) : `${visibleGroups.length} suggested groups are visible at this level. Click a highlighted term to decide.`}</span></div><article className="doc-page"><div className="doc-kicker">BOARD UPDATE · 04 OCTOBER 2026</div><h2>{activeFile.heading}</h2>{activeFile.content.map((paragraph, index) => <p key={`${activeFile.name}-${index}`}>{renderParagraph(paragraph)}</p>)}<div className="legend"><span className="legend-item"><span className="legend-swatch" />Suggested</span><span className="legend-item"><span className="legend-swatch manual" />Manual decision</span><span className="legend-item">Click a term to inspect its group</span></div></article><div className="preview-foot"><span><strong>{activeFile.isProjectDocument ? visibleCandidates.reduce((sum, candidate) => sum + (candidate.decision === 'excluded' ? 0 : candidate.occurrenceCount), 0) : matchCount}</strong> included or suggested occurrences at level <strong>{level}</strong></span><span>Original stays unchanged</span></div>{undo?.file === activeName && <button className="small-btn undo-button" onClick={undoDecision}>Undo last decision</button>}</div> : <div className="preview changes-pane"><div className="preview-note"><span className="status-dot" /><span>Export diff for version 03</span></div><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}><thead><tr style={{ color: 'var(--muted)', font: '11px var(--font-mono)', textAlign: 'left' }}><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>OCCURRENCE</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>REPLACEMENT</th><th style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>DECISION</th></tr></thead><tbody>{changeRows.map(({ group, occurrences, decision }) => <tr key={group.id}><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{group.term} · {occurrences} {occurrences === 1 ? 'match' : 'matches'}</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>[[{group.token}]]</td><td style={{ padding: '12px 8px', borderBottom: '1px solid var(--border-soft)' }}>{decision === 'excluded' ? 'Excluded' : decision === 'included' ? 'Included' : 'Suggested'}</td></tr>)}</tbody></table></div>}
             </section>
@@ -988,12 +1261,15 @@ export default function App() {
                 <p className="coverage-scope">Only adapter-supported editable text is reviewed. Images/OCR, metadata, macros, embedded binary content, and unhandled text surfaces are not analyzed. Unsupported-part warnings must be considered before any later export.</p>
               </section>}
               <section className="panel status-card"><div className="status-line"><span className="status-dot" /><div><strong>Private local workspace</strong><p>{currentProject ? 'Project metadata and graph state are stored locally; demo documents are not part of this project.' : 'Text preview runs in this browser. No document is uploaded.'}</p></div></div><hr className="rule" /><div className="status-stat"><span>Graph protection</span><span>{currentProject ? 'AES-GCM' : 'Session only'}</span></div><div className="status-stat"><span>Project state</span><span>{currentProject ? 'saved locally' : 'demo only'}</span></div><div className="status-stat"><span>File ceiling</span><span>100 MB</span></div></section>
-              <section className="panel status-card"><div className="panel-head" style={{ padding: '0 0 12px', border: 0, minHeight: 'auto' }}><span className="panel-title">Restore returned file</span><span className="panel-meta">1 ready</span></div><p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 12, lineHeight: 1.45 }}>agent-return.pptx has placeholders from this project's sample graph.</p><button className="primary-btn" style={{ width: '100%' }} onClick={restorePreview}>Preview restoration</button></section>
+              {activeFile.isProjectDocument && <section className="panel status-card"><div className="panel-head" style={{ padding: '0 0 12px', border: 0, minHeight: 'auto' }}><span className="panel-title">Restore returned Office file</span><span className="panel-meta">Exact tokens only</span></div><p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 12, lineHeight: 1.45 }}>{activeVersion.kind === 'obfuscated' ? 'Choose the returned DOCX, PPTX, or XLSX associated with this obfuscated version. Unknown or changed tokens remain untouched.' : 'Select an obfuscated DOCX, PPTX, or XLSX version above to restore a returned file.'}</p><button className="primary-btn" style={{ width: '100%' }} disabled={activeVersion.kind !== 'obfuscated' || restoreBusy} onClick={previewProjectRestoration}>{restoreBusy ? 'Preparing…' : 'Choose file & preview'}</button>{activeFile.restoreReport && <dl className="restore-report"><div><dt>Exact occurrences restored</dt><dd>{activeFile.restoreReport.restoredCount}</dd></div><div><dt>Unresolved occurrences</dt><dd>{activeFile.restoreReport.unresolvedCount}</dd></div></dl>}</section>}
             </aside>
           </section>
         </div>
       </main>
       {exportPreview && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !exportBusy) setExportPreview(null); }}><section className="modal export-preview-modal" role="dialog" aria-modal="true" aria-labelledby="export-preview-title" aria-describedby="export-preview-description"><h2 id="export-preview-title">Review obfuscated copy</h2><p id="export-preview-description">{exportPreview.outputName} · {exportPreview.matchCount} supported-text occurrences will change. This preview does not modify the original.</p><div className="export-preview-content"><h3>Selected replacements</h3><ul className="export-match-list">{exportPreview.matches.map((match) => <li key={match.candidateId}><span><strong>{match.term}</strong> · {match.occurrenceCount} {match.occurrenceCount === 1 ? 'match' : 'matches'}</span><code>{match.token}</code></li>)}</ul><h3>Output preview · {exportPreview.format}</h3><pre>{exportPreviewText || 'No supported text is present in this preview.'}</pre><h3>Coverage and warnings</h3>{exportPreview.warnings.length ? <ul className="export-warning-list">{exportPreview.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul> : <p>No adapter warnings were reported. This is not a guarantee that all sensitive information was found.</p>}<p>Only adapter-supported editable text is processed. Images/OCR, metadata, macros, embedded binary content, and unhandled text surfaces are not sanitized. The private replacement map remains encrypted in this project and is not included in the output file.</p></div>{exportPreview.requiresAcknowledgement && <label className="export-warning-ack"><input type="checkbox" checked={exportAcknowledged} onChange={(event) => setExportAcknowledged(event.target.checked)} /><span>I reviewed the coverage and placeholder warnings and understand unsupported or unrecognized content may remain.</span></label>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setExportPreview(null)} disabled={exportBusy}>Cancel</button><button className="primary-btn" type="button" onClick={approveProjectExport} disabled={exportBusy || (exportPreview.requiresAcknowledgement && !exportAcknowledged)}>{exportBusy ? 'Saving version…' : 'Approve and save new version'}</button></div></section></div>}
+      {sessionLocked && <div className="modal-backdrop open session-lock-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="session-lock-title"><h2 id="session-lock-title">Local workspace locked</h2><p>Private project data is hidden after 15 minutes without activity. Reopen the project through the OS credential store to continue.</p><div className="modal-actions"><button className="primary-btn" type="button" disabled={unlockBusy || !localToken} onClick={unlockProjectSession}>{unlockBusy ? 'Unlocking…' : 'Unlock project'}</button></div></section></div>}
+      {restorePreviewData && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !restoreBusy) setRestorePreviewData(null); }}><section className="modal export-preview-modal" role="dialog" aria-modal="true" aria-labelledby="restore-preview-title"><h2 id="restore-preview-title">Review restored copy</h2><p>{restorePreviewData.outputName} · {restorePreviewData.report.restoredCount} exact occurrences restored. The returned file and project versions remain unchanged until you save.</p><div className="export-preview-content"><h3>Restored output preview · {restorePreviewData.format}</h3><pre>{previewLines(restorePreviewData.preview).join('\n') || 'No supported editable text was found.'}</pre><h3>Adapter coverage</h3>{restorePreviewData.preview.warnings?.length ? <ul className="export-warning-list">{restorePreviewData.preview.warnings.map((warning, index) => <li key={`restore-warning-${index}`}>{warning}</li>)}</ul> : <p>No adapter coverage warnings were reported. This is not proof that all document content was examined.</p>}<h3>Unresolved tokens · {restorePreviewData.report.unresolvedCount}</h3>{restorePreviewData.report.unresolvedTokens.length ? <ul className="export-warning-list">{restorePreviewData.report.unresolvedTokens.map((item) => <li key={`${item.status}-${item.token}`}><code>{item.token}</code> · {item.count} · {item.status === 'altered' ? 'altered, left unchanged' : 'unknown or foreign, left unchanged'}</li>)}{restorePreviewData.report.unresolvedTokensTruncated && <li>Only the first 500 unique token values are listed; unresolved totals include all occurrences.</li>}</ul> : <p>No unresolved placeholder-like strings were detected in supported text.</p>}<p>Only exact intact tokens from this document and selected project version are restored. This report does not certify unsupported package content.</p></div><div className="modal-actions"><button className="text-btn" type="button" disabled={restoreBusy} onClick={() => setRestorePreviewData(null)}>Cancel</button><button className="primary-btn" type="button" disabled={restoreBusy} onClick={commitProjectRestoration}>{restoreBusy ? 'Saving…' : 'Save restored version'}</button></div></section></div>}
+      {backupDialog && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !backupBusy) setBackupDialog(null); }}><form className="modal backup-modal" role="dialog" aria-modal="true" aria-labelledby="backup-dialog-title" onSubmit={backupDialog === 'create' ? createPortableBackup : restorePortableBackup}><h2 id="backup-dialog-title">Encrypted portable backup</h2><p>A passphrase-encrypted copy includes project documents, versions, and the private mapping. Keep the passphrase separately; it cannot be recovered.</p><div className="view-switch" role="tablist" aria-label="Backup action"><button type="button" className={backupDialog === 'create' ? 'active' : ''} role="tab" aria-selected={backupDialog === 'create'} onClick={() => setBackupDialog('create')} disabled={!currentProject}>Create</button><button type="button" className={backupDialog === 'restore' ? 'active' : ''} role="tab" aria-selected={backupDialog === 'restore'} onClick={() => setBackupDialog('restore')}>Restore</button></div>{backupDialog === 'restore' && <label className="project-field">Destination project folder<div className="backup-folder-field"><input value={backupDirectory} onChange={(event) => setBackupDirectory(event.target.value)} required placeholder="Choose an empty folder" /><button className="text-btn" type="button" onClick={chooseBackupDirectory} disabled={backupBusy}>Browse</button></div></label>}<label className="project-field">Backup passphrase<input type="password" value={backupPassphrase} onChange={(event) => setBackupPassphrase(event.target.value)} required minLength={12} maxLength={1024} autoComplete="new-password" placeholder="At least 12 characters" /></label><p className="backup-note">{backupDialog === 'create' ? 'Downloads a .blotbackup file protected by a memory-hard passphrase key.' : 'Choose the .blotbackup file after selecting an empty destination folder.'}</p><div className="modal-actions"><button className="text-btn" type="button" disabled={backupBusy} onClick={() => setBackupDialog(null)}>Cancel</button><button className="primary-btn" type="submit" disabled={backupBusy || !localToken || (backupDialog === 'create' && !currentProject)}>{backupBusy ? 'Working…' : backupDialog === 'create' ? 'Create encrypted backup' : 'Choose backup & restore'}</button></div></form></div>}
       {toast && <div className="toast show" role="status" aria-live="polite">{toast}</div>}
       {modalOpen && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget) setModalOpen(false); }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">Import into Cedar briefing</h2><p>Files stay on this computer. This browser preview reads TXT, MD, and CSV. Office text extraction requires the local document engine.</p><label className="drop-zone"><strong>Choose a local file</strong><span>Up to 100 MB · no upload or cloud connection</span><input type="file" accept=".txt,.md,.csv,text/plain,text/csv" onChange={handleImport} aria-label="Choose a local text file" /></label><div className="modal-actions"><button className="text-btn" onClick={() => setModalOpen(false)}>Cancel</button></div></div></div>}
       {projectModalOpen && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !projectBusy) setProjectModalOpen(false); }}><form className="modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title" onSubmit={submitProject}><h2 id="project-modal-title">Local project folder</h2><p>Create a new workspace or open an existing Blot project. The folder and encrypted project state stay on this computer.</p><div className="view-switch" role="tablist" aria-label="Project action"><button type="button" className={projectAction === 'create' ? 'active' : ''} role="tab" aria-selected={projectAction === 'create'} onClick={() => setProjectAction('create')}>Create</button><button type="button" className={projectAction === 'open' ? 'active' : ''} role="tab" aria-selected={projectAction === 'open'} onClick={() => setProjectAction('open')}>Open existing</button></div>{projectAction === 'create' && <label className="project-field">Project name<input value={projectName} onChange={(event) => setProjectName(event.target.value)} required maxLength={100} autoFocus /></label>}<label className="project-field">Project folder<input value={projectDirectory} onChange={(event) => setProjectDirectory(event.target.value)} required placeholder="Choose a local folder" /></label><button className="text-btn" type="button" onClick={chooseProjectDirectory} disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : 'Browse on this computer'}</button>{!serviceAvailable && <p role="status">Start FastAPI to create or open a local project.</p>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setProjectModalOpen(false)} disabled={projectBusy}>Cancel</button><button className="primary-btn" type="submit" disabled={!serviceAvailable || projectBusy}>{projectBusy ? 'Working…' : projectAction === 'create' ? 'Create project' : 'Open project'}</button></div></form></div>}

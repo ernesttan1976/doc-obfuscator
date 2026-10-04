@@ -4,6 +4,7 @@ import hmac
 import ipaddress
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -19,6 +20,7 @@ from .candidate_engine import CandidateError
 from .document_adapters import DocumentAdapterError
 from .folder_picker import (
     FolderPickerError,
+    pick_backup_file,
     pick_document_files,
     pick_project_directory,
 )
@@ -110,6 +112,31 @@ class DocumentVersionRequest(BaseModel):
     version_id: str = Field(min_length=1, max_length=100)
 
 
+class RestorationPreviewRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
+    source_version_id: str = Field(min_length=1, max_length=100)
+    returned_path: str = Field(min_length=1, max_length=4096)
+
+
+class RestorationCommitRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    plan_id: str = Field(min_length=1, max_length=100)
+
+
+class PortableBackupRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    passphrase: str = Field(min_length=12, max_length=1024)
+
+
+class PortableBackupRestoreRequest(PortableBackupRequest):
+    backup_path: str = Field(min_length=1, max_length=4096)
+
+
+class SessionUnlockRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+
+
 class AnalyzeCandidatesRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=4096)
     document_id: str = Field(min_length=1, max_length=100)
@@ -154,6 +181,10 @@ def create_app(
     local_token = secrets.token_urlsafe(32)
     dev_origins = _configured_dev_origins()
     app.state.local_token = local_token
+    app.state.session_last_activity = time.monotonic()
+    app.state.session_locked = False
+    app.state.session_idle_timeout_seconds = 15 * 60
+    app.state.active_project_directory = None
     app.state.model_manager = LocalModelManager(models_directory)
     app.state.similarity_manager = LocalSimilarityManager(models_directory)
     app.state.project_service = (
@@ -186,6 +217,23 @@ def create_app(
                 supplied = request.headers.get("x-local-app-token", "")
                 if not hmac.compare_digest(supplied, local_token):
                     return JSONResponse({"detail": "A valid local app token is required."}, status_code=401)
+                now = time.monotonic()
+                if (
+                    request.url.path != "/api/session/unlock"
+                    and app.state.active_project_directory is not None
+                    and now - app.state.session_last_activity >= app.state.session_idle_timeout_seconds
+                ):
+                    app.state.session_locked = True
+                    service = app.state.project_service
+                    if service is not None:
+                        service.clear_pending_operations()
+                if app.state.session_locked and request.url.path != "/api/session/unlock":
+                    return JSONResponse(
+                        {"detail": "The local project session is locked after 15 minutes of inactivity."},
+                        status_code=423,
+                    )
+                if request.url.path not in {"/api/session", "/api/session/unlock"}:
+                    app.state.session_last_activity = now
         return await call_next(request)
 
     @app.get("/api/health")
@@ -202,8 +250,29 @@ def create_app(
         return response
 
     @app.get("/api/session")
-    async def session() -> dict[str, str]:
-        return {"status": "ready", "storage": "not-configured"}
+    async def session() -> dict[str, str | int]:
+        return {
+            "status": "locked" if app.state.session_locked else "ready",
+            "storage": "os-credential-store",
+            "idleTimeoutSeconds": app.state.session_idle_timeout_seconds,
+        }
+
+    @app.post("/api/session/activity")
+    async def record_session_activity() -> dict[str, str]:
+        return {"status": "ready"}
+
+    @app.post("/api/session/unlock")
+    def unlock_session(payload: SessionUnlockRequest) -> dict[str, str]:
+        try:
+            project = project_service().open(payload.directory)
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        app.state.session_locked = False
+        app.state.active_project_directory = str(project.directory)
+        app.state.session_last_activity = time.monotonic()
+        return {"status": "ready", "storage": "os-credential-store"}
 
     @app.get("/api/models/ner/status")
     def ner_model_status() -> dict[str, object]:
@@ -254,6 +323,7 @@ def create_app(
     def create_project(payload: CreateProjectRequest) -> dict[str, object]:
         try:
             project = project_service().create(payload.directory, payload.name)
+            app.state.active_project_directory = str(project.directory)
             return {**project.to_public_dict(), "documents": []}
         except KeyStoreUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -265,6 +335,7 @@ def create_app(
         try:
             service = project_service()
             project = service.open(payload.directory)
+            app.state.active_project_directory = str(project.directory)
             documents = service.list_documents(payload.directory)
             return {
                 **project.to_public_dict(),
@@ -294,6 +365,16 @@ def create_app(
         if selected is None:
             return {"cancelled": True}
         return {"cancelled": False, "files": [str(path) for path in selected]}
+
+    @app.get("/api/dialogs/backup-file")
+    def choose_backup_file() -> dict[str, str | bool]:
+        try:
+            selected = pick_backup_file()
+        except FolderPickerError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        if selected is None:
+            return {"cancelled": True}
+        return {"cancelled": False, "path": str(selected)}
 
     @app.post("/api/projects/documents")
     def import_project_documents(payload: ImportDocumentsRequest) -> dict[str, object]:
@@ -364,6 +445,64 @@ def create_app(
         except ProjectError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return FileResponse(path, filename=filename, media_type="application/octet-stream")
+
+    @app.post("/api/projects/restore-preview")
+    def preview_project_restoration(payload: RestorationPreviewRequest) -> dict[str, object]:
+        try:
+            return project_service().preview_restoration(
+                payload.directory,
+                payload.document_id,
+                payload.source_version_id,
+                payload.returned_path,
+            )
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except DocumentAdapterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/restore")
+    def commit_project_restoration(payload: RestorationCommitRequest) -> dict[str, object]:
+        try:
+            return project_service().commit_restoration(payload.directory, payload.plan_id)
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/projects/backup")
+    def create_project_backup(payload: PortableBackupRequest) -> Response:
+        try:
+            content = project_service().create_portable_backup(payload.directory, payload.passphrase)
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(
+            content,
+            media_type="application/vnd.blot.encrypted-backup",
+            headers={"Content-Disposition": 'attachment; filename="blot-project.blotbackup"'},
+        )
+
+    @app.post("/api/projects/backup/restore")
+    def restore_project_backup(payload: PortableBackupRestoreRequest) -> dict[str, object]:
+        try:
+            project = project_service().restore_portable_backup(
+                payload.directory,
+                payload.backup_path,
+                payload.passphrase,
+            )
+            app.state.active_project_directory = str(project.directory)
+            service = project_service()
+            return {
+                **project.to_public_dict(),
+                "documents": [document.to_public_dict() for document in service.list_documents(payload.directory)],
+            }
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/projects/document-candidates")
     def analyze_project_document_candidates(payload: AnalyzeCandidatesRequest) -> dict[str, object]:

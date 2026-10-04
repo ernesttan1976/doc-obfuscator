@@ -166,6 +166,8 @@ Development keeps the existing high-fidelity React design. Release serving must 
 
 **Gate:** moved/repeated intact tokens restore; altered/foreign tokens do not; unresolved report is accurate; all originals remain unchanged.
 
+**Implemented:** the user associates a returned DOCX/PPTX/XLSX with an obfuscated version in the active project. The preview restores only exact, case-sensitive tokens whose encrypted mapping belongs to that document and source version; moved and repeated tokens are supported across adapter text blocks. Unknown/foreign and altered token-like strings remain unchanged and are counted in the report. Approval saves a new `restored` version, preserves the returned file, and stores the report in encrypted project state. Restored copies can be previewed and downloaded. Synthetic API acceptance covers export → agent-edit simulation → preview → restore → unresolved reporting → immutable original checks.
+
 ### Stage 9 — Cross-platform launcher, backup, and release hardening
 
 - Provide macOS and Windows launch/setup scripts that bootstrap the pinned environment, start loopback service, open the browser, and stop cleanly.
@@ -175,6 +177,10 @@ Development keeps the existing high-fidelity React design. Release serving must 
 
 **Gate:** fresh setup and uninstall/reinstall test on macOS and Windows; offline workflow works after model acquisition; dependency/license/security checks pass.
 
+**Implemented:** macOS setup/launch commands and Windows PowerShell setup/launch scripts bootstrap pinned dependencies, build the UI, start the loopback service, open the browser, and stop the service on normal exit. Idle activity locks the API after 15 minutes, clears pending export/restore plans, hides loaded project documents in the UI, and requires reopening through the OS credential-store provider. Portable project backups include versions and encrypted project state, use a user passphrase with scrypt + AES-GCM, and restore to an empty folder with a fresh OS-protected project key. Pinned model artifacts now resume from verified HTTP byte ranges after cancellation/interruption while retaining checksum validation.
+
+**Acceptance still pending:** interactive OS credential-store prompts and clean install/uninstall behavior need validation on real macOS and Windows accounts. Offline model inference, model quality/resource limits, 100 MB performance, and release dependency/license review remain part of the platform release gate.
+
 ### Stage 10 — Pilot and acceptance release
 
 - Run acceptance suite exclusively with synthetic data; pilot with non-sensitive documents only after explicit informed review.
@@ -182,6 +188,8 @@ Development keeps the existing high-fidelity React design. Release serving must 
 - Review the PRD, supported-format matrix, privacy copy, setup instructions, and known limitations against shipped behavior.
 
 **Release gate:** FR01–FR10 plus approved XLSX additions have mapped passing acceptance tests; privacy invariants have automated checks; no known silent-loss/false-completion path remains.
+
+**Implemented foundation:** a synthetic-data integration test now exercises project create/import, candidate review, obfuscation export, returned Office edit simulation, exact restoration, unknown/altered token reporting, encrypted portable backup, and backup restore with mapping portability. Automated tests also cover API idle-lock enforcement and resumable downloads. Human pilot, false-positive review, browser keyboard/responsive review, cross-platform installation, and performance measurements have not yet been completed.
 
 ## Cross-cutting verification strategy
 
@@ -212,6 +220,8 @@ Development keeps the existing high-fidelity React design. Release serving must 
 - [~] Stage 5 foundation: deterministic local pattern candidates, manual phrase candidates, encrypted version-scoped graph storage, candidate Include/Exclude pinning, unconfirmed RapidFuzz proposals, local MiniLM contextual proposals with masked mentions, and explicit confirmed group operations. Candidate breadth filtering and pinned-decision visibility have focused unit coverage. Fixed-revision Apache-2.0 GLiNER and MiniLM artifacts have confirmed-only, integrity-checked download paths and an optional local runtime; artifact acquisition and real inference/quality/performance validation remain pending before the full acceptance gate.
 - [~] Stage 6 review workflow: saved document/version selection, import/parse status, bounded editable-text preview, candidate breadth, match/review counts, Include/Exclude/group decisions, Undo, coverage reporting, DOCX/PPTX section navigation, dense mode, accessible controls, and an empty-project import state. Keyboard interaction is implemented; responsive browser/keyboard acceptance is pending.
 - [~] Stage 7 obfuscation preview/export: cryptographically random collision-checked placeholders, encrypted-only mappings, exact output preview, explicit coverage acknowledgement, immutable output versions, protected repeat download, and approval invalidation for source/graph/level changes. Backend synthetic integration tests pass; browser-based flow validation remains pending.
-- [ ] Stages 8–10: returned Office restoration, idle relock, encrypted backup, release launchers, and pilot/release acceptance.
+- [~] Stage 8 returned Office restoration: exact version-scoped restoration, unresolved reporting, and immutable restored versions are implemented and covered by synthetic integration tests.
+- [~] Stage 9 release hardening: encrypted portable backup/restore, 15-minute idle locking, resumable integrity-checked model downloads, and macOS/Windows setup/launch scripts are implemented; actual OS prompt/platform acceptance remains pending.
+- [~] Stage 10 pilot/release acceptance: synthetic end-to-end acceptance coverage is implemented; user pilot, browser accessibility/responsiveness, Windows/macOS installation, model inference/resource, and 100 MB performance gates remain pending.
 
-**Current boundary:** Stages 6 and 7 are implemented in the saved-project UI and protected local API; synthetic backend acceptance covers export approval, collision-resistant tokens, encrypted mapping, immutable versions, download/preview, coverage acknowledgement, and graph invalidation. A hands-on browser review of the complete flow and responsive/keyboard behavior remains. Stage 8 restoration is not implemented; TXT/MD/CSV/XLSX/DOCX/PPTX adapters provide local preview and exact replacement serialization. Unsupported-part warnings remain attached to source/output preview and require acknowledgement before export. Pinned NER/MiniLM weights and real inference/quality/performance validation are still pending. Idle relock and portable encrypted backup remain Stage 9 work; the chosen unlock policy is OS reauthentication, not a UI-only lock.
+**Current boundary:** Stages 6–9 now have connected saved-project UI/API workflows, synthetic tests, and launch/bootstrap assets. Stage 10 has a synthetic end-to-end acceptance foundation, not a completed pilot or release sign-off. Actual OS credential prompts and setup/teardown remain unverified on Windows and require hands-on macOS acceptance; the idle gate delegates the unlock check to the OS credential-store provider. Pinned NER/MiniLM artifacts remain opt-in and unacquired by default; real inference quality/resource limits, offline acceptance, browser accessibility/responsiveness, and 100 MB performance are outstanding. Unsupported-part warnings remain attached to previews/versions and require acknowledgement before export.

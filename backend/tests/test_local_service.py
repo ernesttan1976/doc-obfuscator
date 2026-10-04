@@ -2,6 +2,7 @@ import io
 import os
 import secrets
 import sqlite3
+import time
 import zipfile
 from types import SimpleNamespace
 
@@ -40,7 +41,7 @@ def local_client(tmp_path, key_store=None):
     return app, httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8765")
 
 
-def minimal_docx():
+def minimal_docx(text="Office preview content"):
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(
@@ -50,7 +51,7 @@ def minimal_docx():
         archive.writestr(
             "word/document.xml",
             "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
-            "<w:body><w:p><w:r><w:t>Office preview content</w:t></w:r></w:p></w:body></w:document>",
+            f"<w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>",
         )
     return package.getvalue()
 
@@ -85,8 +86,34 @@ async def test_bootstrap_token_is_uncached_and_required_for_private_api(tmp_path
 
     assert session.json() == {
         "status": "ready",
-        "storage": "not-configured",
+        "storage": "os-credential-store",
+        "idleTimeoutSeconds": 900,
     }
+
+
+@pytest.mark.anyio
+async def test_idle_project_session_locks_private_api_until_os_store_unlock(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        headers = {"X-Local-App-Token": app.state.local_token}
+        created = await client.post(
+            "/api/projects",
+            json={"name": "Project", "directory": str(root)},
+            headers=headers,
+        )
+        assert created.status_code == 201
+        app.state.session_last_activity = time.monotonic() - 901
+        locked = await client.get("/api/session", headers=headers)
+        denied = await client.post("/api/projects/open", json={"directory": str(root)}, headers=headers)
+        unlocked = await client.post("/api/session/unlock", json={"directory": str(root)}, headers=headers)
+        reopened = await client.post("/api/projects/open", json={"directory": str(root)}, headers=headers)
+
+    assert locked.status_code == denied.status_code == 423
+    assert unlocked.status_code == 200
+    assert unlocked.json()["storage"] == "os-credential-store"
+    assert reopened.status_code == 200
 
 
 @pytest.mark.anyio
@@ -622,6 +649,158 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
 
 
 @pytest.mark.anyio
+async def test_returned_office_restoration_restores_only_exact_project_tokens(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "brief.docx"
+    returned = tmp_path / "agent-return.docx"
+    backup_path = tmp_path / "project.blotbackup"
+    restored_root = tmp_path / "restored-project"
+    root.mkdir()
+    restored_root.mkdir()
+    source.write_bytes(minimal_docx("Alex Tan"))
+    original = source.read_bytes()
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        headers = {"X-Local-App-Token": app.state.local_token}
+        await client.post("/api/projects", json={"name": "Project", "directory": str(root)}, headers=headers)
+        imported = await client.post(
+            "/api/projects/documents",
+            json={"directory": str(root), "files": [str(source)]},
+            headers=headers,
+        )
+        document = imported.json()["documents"][0]
+        request = {"directory": str(root), "document_id": document["id"]}
+        analysis = await client.post(
+            "/api/projects/document-candidates",
+            json={**request, "manual_terms": ["Alex Tan"]},
+            headers=headers,
+        )
+        assert analysis.status_code == 200, analysis.text
+        export_preview = await client.post(
+            "/api/projects/export-preview",
+            json={**request, "level": 1},
+            headers=headers,
+        )
+        token = export_preview.json()["matches"][0]["token"]
+        exported = await client.post(
+            "/api/projects/export",
+            json={**request, "plan_id": export_preview.json()["planId"], "acknowledge_warnings": True},
+            headers=headers,
+        )
+        assert exported.status_code == 200
+
+        foreign = "[[T_foreign123]]"
+        altered = "[[T_modified!]]"
+        returned.write_bytes(
+            minimal_docx(
+                f"Agent moved {token} and repeated {token}; changed case {token.lower()}; "
+                f"foreign {foreign}; altered {altered}."
+            )
+        )
+        restoration = await client.post(
+            "/api/projects/restore-preview",
+            json={
+                **request,
+                "source_version_id": exported.json()["id"],
+                "returned_path": str(returned),
+            },
+            headers=headers,
+        )
+        assert restoration.status_code == 200
+        preview = restoration.json()
+        stale_preview = await client.post(
+            "/api/projects/restore-preview",
+            json={
+                **request,
+                "source_version_id": exported.json()["id"],
+                "returned_path": str(returned),
+            },
+            headers=headers,
+        )
+        private_state = app.state.project_service.load_private_state(root)
+        previous_term = private_state["mapping"][token]["term"]
+        private_state["mapping"][token]["term"] = "Changed during restoration review"
+        app.state.project_service.save_private_state(root, private_state)
+        stale_commit = await client.post(
+            "/api/projects/restore",
+            json={"directory": str(root), "plan_id": stale_preview.json()["planId"]},
+            headers=headers,
+        )
+        private_state["mapping"][token]["term"] = previous_term
+        app.state.project_service.save_private_state(root, private_state)
+        restored = await client.post(
+            "/api/projects/restore",
+            json={"directory": str(root), "plan_id": preview["planId"]},
+            headers=headers,
+        )
+        restored_preview = await client.post(
+            "/api/projects/document-preview",
+            json={**request, "version_id": restored.json()["id"]},
+            headers=headers,
+        )
+        downloaded = await client.post(
+            "/api/projects/document-version-download",
+            json={**request, "version_id": restored.json()["id"]},
+            headers=headers,
+        )
+        portable_backup = await client.post(
+            "/api/projects/backup",
+            json={"directory": str(root), "passphrase": "correct horse battery staple"},
+            headers=headers,
+        )
+        backup_path.write_bytes(portable_backup.content)
+        portable_restore = await client.post(
+            "/api/projects/backup/restore",
+            json={
+                "directory": str(restored_root),
+                "backup_path": str(backup_path),
+                "passphrase": "correct horse battery staple",
+            },
+            headers=headers,
+        )
+        restored_project_document = portable_restore.json()["documents"][0]
+        portable_restore_preview = await client.post(
+            "/api/projects/restore-preview",
+            json={
+                "directory": str(restored_root),
+                "document_id": restored_project_document["id"],
+                "source_version_id": exported.json()["id"],
+                "returned_path": str(returned),
+            },
+            headers=headers,
+        )
+
+    assert preview["report"]["restoredCount"] == 2
+    assert preview["report"]["unresolvedCount"] == 3
+    assert preview["report"]["unknownOrForeignCount"] == 1
+    assert preview["report"]["alteredCount"] == 2
+    assert "Alex Tan" in preview["preview"]["text"]
+    assert token not in preview["preview"]["text"]
+    assert token.lower() in preview["preview"]["text"]
+    assert foreign in preview["preview"]["text"]
+    assert altered in preview["preview"]["text"]
+    assert restored.status_code == 200, restored.text
+    assert stale_commit.status_code == 409
+    assert restored_preview.status_code == 200, restored_preview.text
+    assert downloaded.status_code == 200, downloaded.text
+    assert portable_backup.status_code == portable_restore.status_code == 200
+    assert portable_restore_preview.status_code == 200, portable_restore_preview.text
+    assert b"Alex Tan" not in portable_backup.content
+    assert portable_restore.json()["id"] != app.state.project_service.open(root).project_id
+    assert portable_restore_preview.json()["report"] == preview["report"]
+    if os.name != "nt":
+        restored_original = restored_root / ".blot" / "originals" / document["id"] / "original.docx"
+        assert restored_original.stat().st_mode & 0o222 == 0
+    assert restored.json()["kind"] == "restored"
+    assert restored_preview.json()["restoreReport"] == preview["report"]
+    assert b"Alex Tan" in downloaded.content
+    assert token.encode() not in downloaded.content
+    assert foreign.encode() in downloaded.content
+    assert altered.encode() in downloaded.content
+    assert source.read_bytes() == original
+
+
+@pytest.mark.anyio
 async def test_export_plan_is_invalidated_when_candidate_decisions_change(tmp_path):
     root = tmp_path / "project"
     source = tmp_path / "brief.txt"
@@ -733,6 +912,23 @@ async def test_native_document_picker_is_token_protected_and_returns_selected_fi
     assert denied.status_code == 401
     assert accepted.status_code == 200
     assert accepted.json() == {"cancelled": False, "files": [str(path) for path in selected]}
+
+
+@pytest.mark.anyio
+async def test_native_backup_picker_is_token_protected(tmp_path, monkeypatch):
+    selected = tmp_path / "project.blotbackup"
+    monkeypatch.setattr(main_module, "pick_backup_file", lambda: selected)
+    app, client_context = local_client(tmp_path)
+    async with client_context as client:
+        denied = await client.get("/api/dialogs/backup-file")
+        accepted = await client.get(
+            "/api/dialogs/backup-file",
+            headers={"X-Local-App-Token": app.state.local_token},
+        )
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json() == {"cancelled": False, "path": str(selected)}
 
 
 @pytest.mark.parametrize(

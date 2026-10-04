@@ -22,7 +22,7 @@ uv run python -m backend.app
 
 To install the optional local model runtime, run `uv sync --extra models`. This installs Python packages only; NER and MiniLM weights/tokenizer assets remain absent until explicitly downloaded from their controls in the saved-document review panel.
 
-In a second terminal, run `npm run dev`. Vite proxies `/api` to the loopback-only service at `127.0.0.1:8765`. The API provides `/api/health`, a launch-scoped `/api/bootstrap` token, protected project create/open/import/version-preview/candidate-analysis/candidate-decision/candidate-group/export-preview/export/download endpoints, explicit local-model status/download/cancel endpoints, and native folder/document pickers.
+In a second terminal, run `npm run dev`. Vite proxies `/api` to the loopback-only service at `127.0.0.1:8765`. The API provides protected project/version/export/restoration/backup endpoints, explicit local-model status/download/cancel endpoints, native project/document/backup pickers, and an idle session lock.
 
 Use **Add or open project** in the sidebar to create or open a project. Select **Import file** to choose DOCX, PPTX, TXT, MD, CSV, or XLSX sources; each file is copied read-only into `.blot/originals/` and recorded as an original version in `.blot/project.sqlite3`. Files over 100 MB are rejected. Project graph/map state uses AES-GCM encryption with its random data key in the OS credential store.
 
@@ -35,6 +35,27 @@ Opening a saved TXT or MD shows a local text preview with UTF-8/UTF-16 encoding 
 3. Select **Preview & export obfuscated copy**. Inspect the generated placeholders, occurrence counts, bounded output preview, and coverage warnings. Existing placeholder-like strings and unsupported Office/XLSX content require explicit acknowledgement.
 4. Select **Approve and save new version** to write a distinct obfuscated version under `.blot/outputs/` and download it for manual use. The original remains unchanged. Random placeholders are collision-checked; the term map is written only to encrypted project state, never to the output package.
 5. Use the version selector to inspect the obfuscated copy or download it again. Approval previews expire after 15 minutes and are rejected if the source bytes or version-scoped review graph changed.
+
+## Restore a returned Office file
+
+1. Select the associated **Obfuscated** DOCX, PPTX, or XLSX version.
+2. Choose the returned file and review the restored output preview and unresolved-token report.
+3. Save a separate **Restored** version. Only exact case-sensitive tokens mapped to that project document/version are restored. Moved and repeated intact tokens work; changed, unknown, and foreign-project tokens remain untouched and are reported.
+
+The returned file and original are not overwritten. Restoration reports are stored in the encrypted project state and remain available when reopening the restored version.
+
+## Encrypted backup and idle lock
+
+Use **Encrypted backup** to create a portable `.blotbackup` using a passphrase of at least 12 characters, or restore one into an empty project folder. The passphrase is not stored; losing it makes that backup unrecoverable. The archive includes project versions and private mappings and is protected with scrypt-derived AES-GCM encryption. Successful restore creates a fresh project key in the destination computer's OS credential store.
+
+The local project session locks after 15 minutes without user activity. Reopening calls the OS credential-store provider before project state is made available again. Keychain/Credential Manager consent behavior depends on OS account configuration and must be verified on the target machine.
+
+## One-click setup and launch
+
+- **macOS:** run `setup-macos.command` once, then `launch-macos.command` to start Blot in a terminal and open the browser. Closing/stopping the launcher stops the service.
+- **Windows:** double-click `setup-windows.bat` once, then `launch-windows.bat`. The launcher opens the browser and stops the local Python service when the launcher exits. The `.ps1` scripts are also available for PowerShell.
+
+Both launchers bind the service to loopback. The setup scripts require `uv`, Node.js/npm, and internet access for pinned application dependencies. Model weights remain separate, opt-in downloads. Cross-platform clean-install and OS credential-prompt acceptance is still required before release.
 
 Only adapter-supported editable text is covered. Coverage warnings are not proof that all sensitive content was found, and the app does not sanitize images/OCR, metadata, macros, embedded binaries, or unknown package surfaces.
 
@@ -57,4 +78,4 @@ npm run build
 npm run preview
 ```
 
-Stage 6 review and Stage 7 obfuscation/export workflows are implemented. Remaining stages cover returned Office restoration (Stage 8), idle relock, encrypted backup and launchers (Stage 9), and pilot/release acceptance (Stage 10). See the implementation plan for stage gates and remaining validation.
+Stages 6–9 now include connected review/export/restoration workflows, encrypted backup/restore, idle locking, resumable model artifact downloads, and macOS/Windows launch/setup scripts. Stage 10 has a synthetic-data end-to-end acceptance foundation. Real OS credential prompts and installation, model inference/resource limits, browser keyboard/responsive acceptance, human pilot, and 100 MB performance gates remain before release; see `IMPLEMENTATION_PLAN.md`.

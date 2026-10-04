@@ -5,15 +5,18 @@ import importlib.util
 import json
 import math
 import os
-import shutil
 import threading
 import uuid
 from pathlib import Path
-from typing import BinaryIO
-from urllib.request import urlopen
 
 from .candidate_engine import CandidateBlock, propose_contextual_variants
 from .model_manager import ModelFile, ModelManagerError, _hashes_for_file
+from .pinned_download import (
+    DownloadCancelled,
+    partial_download_size,
+    resumable_download,
+    urlopen,
+)
 
 SIMILARITY_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
 SIMILARITY_MODEL_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
@@ -37,10 +40,6 @@ SIMILARITY_ARTIFACT_SHA256 = hashlib.sha256(
 ).hexdigest()
 SIMILARITY_BATCH_SIZE = 32
 SIMILARITY_MAX_LENGTH = 128
-
-
-class _DownloadCancelled(Exception):
-    pass
 
 
 class LocalSimilarityManager:
@@ -88,11 +87,12 @@ class LocalSimilarityManager:
             if self.model_directory.exists():
                 raise ModelManagerError("An incomplete MiniLM directory exists; remove or move it before retrying.")
             job_id = str(uuid.uuid4())
+            partial_directory = self.model_directory.parent / f".{self.model_directory.name}.partial"
             self._cancel.clear()
             self._job = {
                 "jobId": job_id,
                 "status": "downloading",
-                "downloadedBytes": 0,
+                "downloadedBytes": partial_download_size(SIMILARITY_FILES, partial_directory),
                 "totalBytes": SIMILARITY_SIZE_BYTES,
                 "error": None,
             }
@@ -109,23 +109,26 @@ class LocalSimilarityManager:
 
     def _download_worker(self, job_id: str) -> None:
         install_parent = self.model_directory.parent
-        temporary_directory = install_parent / f".{self.model_directory.name}.{job_id}.partial"
+        temporary_directory = install_parent / f".{self.model_directory.name}.partial"
         try:
-            temporary_directory.mkdir(parents=True, mode=0o700)
-            downloaded = 0
-            for model_file in SIMILARITY_FILES:
-                if self._cancel.is_set():
-                    raise _DownloadCancelled
-                target = temporary_directory / model_file.name
-                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                url = (
+            def update_progress(downloaded: int) -> None:
+                with self._lock:
+                    if self._job.get("jobId") == job_id:
+                        self._job["downloadedBytes"] = downloaded
+
+            resumable_download(
+                SIMILARITY_FILES,
+                temporary_directory,
+                lambda artifact: (
                     f"https://huggingface.co/{SIMILARITY_MODEL_ID}/resolve/"
-                    f"{SIMILARITY_MODEL_REVISION}/{model_file.name}"
-                )
-                with urlopen(url, timeout=30) as response, target.open("xb") as destination:
-                    downloaded += self._copy_and_verify(response, destination, model_file, downloaded, job_id)
+                    f"{SIMILARITY_MODEL_REVISION}/{artifact.name}"
+                ),
+                self._cancel,
+                update_progress,
+                opener=urlopen,
+            )
             if self._cancel.is_set():
-                raise _DownloadCancelled
+                raise DownloadCancelled
             manifest = {
                 "modelId": SIMILARITY_MODEL_ID,
                 "revision": SIMILARITY_MODEL_REVISION,
@@ -148,55 +151,23 @@ class LocalSimilarityManager:
             with self._lock:
                 if self._job.get("jobId") == job_id:
                     self._job = {"jobId": job_id, "status": "ready", "downloadedBytes": SIMILARITY_SIZE_BYTES}
-        except _DownloadCancelled:
-            shutil.rmtree(temporary_directory, ignore_errors=True)
+        except DownloadCancelled:
             with self._lock:
                 if self._job.get("jobId") == job_id:
-                    self._job = {"jobId": job_id, "status": "cancelled", "downloadedBytes": 0}
+                    self._job = {
+                        "jobId": job_id,
+                        "status": "cancelled",
+                        "downloadedBytes": partial_download_size(SIMILARITY_FILES, temporary_directory),
+                    }
         except Exception:  # noqa: BLE001 - remote/parser details must not reach the UI
-            shutil.rmtree(temporary_directory, ignore_errors=True)
             with self._lock:
                 if self._job.get("jobId") == job_id:
                     self._job = {
                         "jobId": job_id,
                         "status": "failed",
-                        "downloadedBytes": 0,
+                        "downloadedBytes": partial_download_size(SIMILARITY_FILES, temporary_directory),
                         "error": "Download failed or a MiniLM artifact did not match its pinned integrity check.",
                     }
-
-    def _copy_and_verify(
-        self,
-        response: BinaryIO,
-        destination: BinaryIO,
-        model_file: ModelFile,
-        previous_downloaded: int,
-        job_id: str,
-    ) -> int:
-        sha256 = hashlib.sha256()
-        git_sha1 = hashlib.sha1(f"blob {model_file.size}\0".encode())
-        received = 0
-        while True:
-            if self._cancel.is_set():
-                raise _DownloadCancelled
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            received += len(chunk)
-            if received > model_file.size:
-                raise ModelManagerError("Downloaded MiniLM artifact exceeded its pinned size.")
-            sha256.update(chunk)
-            git_sha1.update(chunk)
-            destination.write(chunk)
-            with self._lock:
-                if self._job.get("jobId") == job_id:
-                    self._job["downloadedBytes"] = previous_downloaded + received
-        if received != model_file.size:
-            raise ModelManagerError("Downloaded MiniLM artifact size did not match its pinned size.")
-        if model_file.sha256 and sha256.hexdigest() != model_file.sha256:
-            raise ModelManagerError("Downloaded MiniLM artifact did not match its pinned SHA-256 digest.")
-        if model_file.git_sha1 and git_sha1.hexdigest() != model_file.git_sha1:
-            raise ModelManagerError("Downloaded MiniLM artifact did not match its pinned Git blob digest.")
-        return received
 
     def _installed_manifest_is_valid(self) -> bool:
         try:

@@ -259,9 +259,14 @@ def parse_document(data: bytes, extension: str) -> ParsedDocument:
     raise DocumentAdapterError("This document format is not supported by the local document adapters.")
 
 
-def serialize_with_replacements(parsed: ParsedDocument, replacements: dict[str, str]) -> bytes:
+def serialize_with_replacements(
+    parsed: ParsedDocument,
+    replacements: dict[str, str],
+    *,
+    case_sensitive: bool = False,
+) -> bytes:
     """Replace exact source strings while preserving their original format."""
-    transform = _replacement_function(replacements)
+    transform = _replacement_function(replacements, case_sensitive=case_sensitive)
     if not replacements:
         return parsed.source
     if parsed.format in {"TXT", "MD"}:
@@ -297,19 +302,22 @@ def count_supported_occurrences(parsed: ParsedDocument, value: str) -> int:
 
 
 class _ReplacementFunction:
-    def __init__(self, replacements: dict[str, str]) -> None:
+    def __init__(self, replacements: dict[str, str], *, case_sensitive: bool = False) -> None:
         if any(not isinstance(key, str) or not key for key in replacements):
             raise DocumentAdapterError("Replacement terms must be non-empty text.")
         if any(not isinstance(value, str) for value in replacements.values()):
             raise DocumentAdapterError("Replacement values must be text.")
         self.replacements = replacements
-        self.casefolded_replacements = {key.casefold(): value for key, value in replacements.items()}
-        if len(self.casefolded_replacements) != len(replacements):
+        self.case_sensitive = case_sensitive
+        self.replacement_lookup = (
+            replacements if case_sensitive else {key.casefold(): value for key, value in replacements.items()}
+        )
+        if not case_sensitive and len(self.replacement_lookup) != len(replacements):
             raise DocumentAdapterError("Replacement terms cannot differ only by letter case.")
         self.pattern = (
             re.compile(
                 "|".join(re.escape(key) for key in sorted(replacements, key=len, reverse=True)),
-                re.IGNORECASE,
+                0 if case_sensitive else re.IGNORECASE,
             )
             if replacements
             else None
@@ -318,19 +326,25 @@ class _ReplacementFunction:
     def __call__(self, value: str) -> str:
         if self.pattern is None:
             return value
-        return self.pattern.sub(lambda match: self.casefolded_replacements[match.group(0).casefold()], value)
+        return self.pattern.sub(self._replacement_for, value)
+
+    def _replacement_for(self, match: re.Match[str]) -> str:
+        key = match.group(0) if self.case_sensitive else match.group(0).casefold()
+        return self.replacement_lookup[key]
 
     def edits(self, value: str) -> list[tuple[int, int, str]]:
         if self.pattern is None:
             return []
         return [
-            (match.start(), match.end(), self.casefolded_replacements[match.group(0).casefold()])
+            (match.start(), match.end(), self._replacement_for(match))
             for match in self.pattern.finditer(value)
         ]
 
 
-def _replacement_function(replacements: dict[str, str]) -> _ReplacementFunction:
-    return _ReplacementFunction(replacements)
+def _replacement_function(
+    replacements: dict[str, str], *, case_sensitive: bool = False
+) -> _ReplacementFunction:
+    return _ReplacementFunction(replacements, case_sensitive=case_sensitive)
 
 
 def _decode_text(data: bytes) -> tuple[str, str]:
