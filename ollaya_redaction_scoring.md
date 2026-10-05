@@ -153,7 +153,7 @@ Scores, priorities, and suggestions must never confirm similarity edges or expan
 2. Before committing to an endpoint, verify Ollaya's supported local invocation/API, model identifiers, response schema, installation/runtime requirements, model licensing, and resource use. Agent-host MCP tools are not themselves a product runtime dependency; Blot must invoke a locally available Ollaya runtime through a supported local interface.
 3. Keep inference local and offline after any explicit model acquisition. Do not send document text, terms, contexts, embeddings, feedback, or graph data to a hosted Ollaya endpoint. Bind any service communication to loopback and apply the existing local-app request protections.
 4. Pass the bounded candidate payload to the local Ollaya adapter. If several snippets are included, ask Ollaya to judge the candidate across those snippets and return one probability per question; do not add any other score signals.
-5. Log one backend call record per candidate with only the model ID, outcome, duration, and valid-signal count. Never log terms, prompts, raw contexts, or raw model responses. Persist only what is required for reproducibility (confidence, priority, scoring version, signal answers/probabilities, and decision evidence) inside the encrypted graph. Context text is transient and is not persisted.
+5. Log each attempted candidate call as one compact JSON line containing the bounded request (questions and candidate state) and Ollaya response, plus model, outcome, duration, and valid-signal count. These local logs therefore include candidate terms/context and model answers. Do not send logs to a hosted endpoint. Persist only what is required for reproducibility (confidence, priority, scoring version, signal answers/probabilities, and decision evidence) inside the encrypted graph; context is not persisted there.
 6. If the Ollaya runtime/model is absent, unavailable, or fails, continue with deterministic baseline scores/tiers and display a non-blocking status. Never block import, preview, or export on inference availability. Do not represent fallback scores as Ollaya scores.
 7. Model downloads, if required, must be explicit, pinned, integrity checked, cancellable, and disclosed, following the existing optional GLiNER/MiniLM acquisition pattern. Do not add an automatic network dependency.
 
@@ -238,7 +238,7 @@ The local model ID is pinned to `von:1.1`. The adapter validates probability ran
 
 - Exercise local Ollaya through the verified supported interface with synthetic candidate/context fixtures.
 - Assert there is no non-loopback Ollaya request and no external transmission of candidate text or context.
-- Assert logs contain neither terms nor context; encrypted graph state contains no plaintext term/context when inspected at rest.
+- Assert each Ollaya request/response is logged on one line and encrypted graph state contains no plaintext term/context when inspected at rest.
 - Assert scoring results remain version-scoped and never alter occurrences, groups, or placeholder maps.
 - Verify behavior with Ollaya installed and unavailable, with optional NER/MiniLM present or absent.
 

@@ -104,7 +104,7 @@ The user must be able to preview the output before export or restoration. Errors
 
 ## 8. Local storage and privacy
 
-The initial release processes files locally and has no built-in LLM connection or background document upload. Keep originals, graphs, mappings and restored files in a private project workspace protected by operating-system account access. Encrypt stored graphs and mappings at rest. Avoid writing original terms into diagnostic logs.
+The initial release processes files locally and has no hosted LLM connection or background document upload. Keep originals, graphs, mappings and restored files in a private project workspace protected by operating-system account access. Encrypt stored graphs and mappings at rest. Ollaya's local request and response are written to one backend log line per candidate as an explicit diagnostic exception; do not send these logs externally.
 
 Only the user-approved obfuscated file leaves the workspace when the user exports it. After export, the app cannot control where the file is sent or retained. Loss of the local graph or map prevents automatic restoration, so provide an encrypted local backup or a clear warning before deletion. The graph contains sensitive term relationships and is protected as carefully as the original document.
 

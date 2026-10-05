@@ -110,7 +110,7 @@ def test_contradictory_or_missing_signal_is_unavailable_not_a_no():
     assert score_result_from_signals(partial)["scoreStatus"] == "partial"
 
 
-def test_local_cli_receives_candidate_payload_on_stdin_and_logs_only_safe_call_metadata(caplog):
+def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
     captured = {}
 
     def fake_run(command, **kwargs):
@@ -153,11 +153,18 @@ def test_local_cli_receives_candidate_payload_on_stdin_and_logs_only_safe_call_m
     assert records[0].ollaya_model == "von:1.1"
     assert records[0].ollaya_outcome == "complete"
     assert records[0].ollaya_signal_count == 2
-    assert "Private Project" not in caplog.text
-    assert "Private context phrase" not in caplog.text
+    log_line = records[0].getMessage()
+    log_entry = json.loads(log_line)
+    assert "\n" not in log_line
+    assert log_entry["request"]["state"] == {
+        "candidate": "Private Project",
+        "contextSnippets": ["Private context phrase"],
+    }
+    assert log_entry["response"]["model"] == "von:1.1"
+    assert log_entry["response"]["answers"]["is_identifier"]["choice"] == "Yes"
 
 
-def test_local_cli_does_not_attempt_to_download_a_missing_model_and_logs_unavailable(caplog):
+def test_local_cli_does_not_attempt_to_download_a_missing_model_and_logs_failed_attempt(caplog):
     calls = []
 
     def fake_run(command, **kwargs):
@@ -173,6 +180,7 @@ def test_local_cli_does_not_attempt_to_download_a_missing_model_and_logs_unavail
     records = [record for record in caplog.records if getattr(record, "ollaya_event", None) == "candidate_scoring_call"]
     assert len(records) == 1
     assert records[0].ollaya_outcome == "unavailable"
+    assert json.loads(records[0].getMessage())["response"] is None
 
 
 class MemoryKeyStore:

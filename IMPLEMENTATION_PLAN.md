@@ -88,7 +88,7 @@ Development keeps the existing high-fidelity React design. Release serving must 
 - Create the threat model and Office coverage inventory before promising “everything editable.” Model and NER artifacts must be pinned, checksummed, licensed, and stored locally after explicit download.
 - Add executable local checks for frontend build and Python tests using synthetic fixtures; automate them in the release hardening stage.
 
-**Gate:** a clean checkout can install and start the local app; an external network client cannot reach the file API; no document content is logged.
+**Gate:** a clean checkout can install and start the local app; an external network client cannot reach the file API; document content is not logged except in the explicitly requested, local one-line Ollaya request/response records.
 
 ### Stage 2 — Project folders, versions, and encrypted local state
 
@@ -196,7 +196,7 @@ Development keeps the existing high-fidelity React design. Release serving must 
 - **Unit:** text encoding/dialect handling, candidate normalization, graph decisions, token generation/collision, encryption/key errors, placeholder exact-match semantics.
 - **Format fixtures:** synthetic DOCX/PPTX/XLSX with tables, split runs, notes, comments/revisions where supported, formulas, styles, unknown parts, pre-existing token-like text, and malformed/hostile ZIP entries.
 - **Integration:** project creation → import → review → include/exclude → preview → export → external-edit simulation → Office restore → unresolved report.
-- **Privacy:** assert no original terms in logs or exported sidecars; exported output contains no map; service listens only on loopback; outbound traffic limited to explicit model download.
+- **Privacy:** assert no original terms in unrelated diagnostics or exported sidecars; Ollaya request/response logs are an explicit local exception; exported output contains no map; service listens only on loopback; outbound traffic limited to explicit model download.
 - **Cross-platform:** run launcher, key-store, filesystem, backup/restore, and path/permission tests on macOS and Windows.
 - **Performance:** import and first preview under 3 seconds for typical synthetic documents; background progress for larger inputs; 100 MB ceiling and memory limits tested.
 

@@ -286,16 +286,32 @@ class LocalOllayaScorer:
         started = time.perf_counter()
         outcome = "unavailable"
         signal_count = 0
+        response_for_log: Any = None
         try:
-            result = self._score_candidate(features)
+            response_for_log = self._score_candidate(features)
+            result = score_result_from_signals(validate_ollaya_response(response_for_log))
             outcome = str(result.get("scoreStatus", "unavailable"))
             signals = result.get("signals")
             signal_count = len(signals) if isinstance(signals, dict) else 0
             return result
         finally:
+            call_log = {
+                "event": "ollaya_call",
+                "model": self.model,
+                "outcome": outcome,
+                "durationMs": round((time.perf_counter() - started) * 1000, 1),
+                "validSignalCount": signal_count,
+                "request": {
+                    "questions": _QUESTIONS,
+                    "state": features,
+                    "format": "json",
+                },
+                "response": response_for_log,
+            }
             _LOGGER.log(
                 logging.WARNING if outcome == "unavailable" else logging.INFO,
-                "Ollaya candidate scoring call finished",
+                "%s",
+                json.dumps(call_log, ensure_ascii=False, separators=(",", ":")),
                 extra={
                     "ollaya_event": "candidate_scoring_call",
                     "ollaya_model": self.model,
@@ -305,7 +321,7 @@ class LocalOllayaScorer:
                 },
             )
 
-    def _score_candidate(self, features: dict[str, Any]) -> dict[str, Any]:
+    def _score_candidate(self, features: dict[str, Any]) -> Any:
         executable = self.executable or shutil.which("ollaya")
         if not executable:
             raise OllayaScoringError("The local Ollaya CLI is not installed or is not on PATH.")
@@ -339,7 +355,7 @@ class LocalOllayaScorer:
             response = json.loads(completed.stdout)
         except (TypeError, json.JSONDecodeError) as exc:
             raise OllayaScoringError("Ollaya returned malformed JSON.") from exc
-        return score_result_from_signals(validate_ollaya_response(response))
+        return response
 
     def _ensure_model_installed(self, executable: str) -> None:
         if self._model_checked:
