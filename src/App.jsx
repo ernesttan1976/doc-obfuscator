@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { getCandidateDecisionCounts, getCandidatesNotSelectedAtLevel, getVisibleCandidates } from './candidate-review.js';
+import { getCandidateDecisionCounts, getCandidatesNotSelectedAtLevel, getVisibleCandidates, isCandidateAutoSuggested } from './candidate-review.js';
 import { findPageTermMatches, mapClientPointToLayer, mapClientRectToLayer } from './page-highlights.js';
 import './stage3-preview.css';
 
@@ -175,7 +175,7 @@ export default function App() {
   const candidates = activeFile.candidates || [];
   const matchCount = reviewableProjectDocument
     ? candidates
-      .filter((candidate) => candidate.level >= 2 && candidate.level <= level && candidate.decision !== 'excluded')
+      .filter((candidate) => candidate.level >= 2 && candidate.level <= level && isCandidateAutoSuggested(candidate))
       .reduce((sum, candidate) => sum + candidate.occurrenceCount, 0)
     : changeRows.reduce((sum, row) => sum + (row.decision === 'excluded' ? 0 : row.occurrences), 0);
   const visibleCandidates = reviewableProjectDocument ? getVisibleCandidates(candidates, level) : [];
@@ -422,7 +422,9 @@ export default function App() {
       });
       const fullText = nodes.map((node) => node.textContent).join('');
       const terms = reviewableProjectDocument
-        ? getVisibleCandidates(activeFile.candidates || [], level)
+        ? getVisibleCandidates(activeFile.candidates || [], level).filter((candidate) => (
+          isCandidateAutoSuggested(candidate) || candidate.decision === 'excluded'
+        ))
         : [];
       const matches = findPageTermMatches(fullText, terms);
       const nodeRanges = [];
@@ -618,6 +620,7 @@ export default function App() {
       if (!found) return part;
       if (found.candidate) {
         const { candidate } = found;
+        if (!isCandidateAutoSuggested(candidate) && candidate.decision !== 'excluded') return part;
         const target = { kind: 'candidate', candidate };
         const className = candidate.decision === 'excluded'
           ? 'excluded'
@@ -662,6 +665,7 @@ export default function App() {
             nerCandidateCount: data.nerCandidateCount || 0,
             nerWarning: data.nerWarning || '',
             similarityWarning: data.similarityWarning || '',
+            ollayaWarning: data.ollayaWarning || '',
             candidateLoaded: true,
             candidateLoading: false,
             candidateError: '',
@@ -1645,9 +1649,11 @@ export default function App() {
                   {activeFile.nerTruncated && <p className="candidate-limit" role="status">The local NER scan was capped at 250,000 supported-text characters; some text was not analyzed by the model.</p>}
                   {activeFile.nerWarning && <p className="candidate-error" role="status">{activeFile.nerWarning}</p>}
                   {activeFile.similarityWarning && <p className="candidate-error" role="status">{activeFile.similarityWarning}</p>}
+                  {activeFile.ollayaWarning && <p className="candidate-error" role="status">{activeFile.ollayaWarning}</p>}
                   {visibleCandidates.map((candidate) => <div className="graph-card candidate-card" key={candidate.id}>
-                    <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">Priority {candidate.level}/10</span></div>
-                    <p className="graph-reason">{candidate.nerLabels?.length ? `NER · ${candidate.nerLabels.join(', ')} · model score ${Math.round((candidate.nerScore || 0) * 100)}%${candidate.source === 'manual' ? ' · manual' : ''}` : `${candidate.category.replaceAll('_', ' ').toLowerCase()} · ${candidate.source}`} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'}</p>
+                    <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">Level {candidate.level} · Review Priority {candidate.reviewPriority == null ? '—' : `${candidate.reviewPriority}/10`}</span></div>
+                    <p className="graph-reason">Redaction confidence {candidate.redactionConfidence == null ? candidate.scoreStatus === 'complete' ? 'no affirmative signal' : 'unavailable' : `${Math.round(candidate.redactionConfidence * 100)}%`}{candidate.scoreStatus === 'complete' && candidate.redactionConfidence == null ? ' · not auto-suggested' : ''} · {candidate.nerLabels?.length ? `NER · ${candidate.nerLabels.join(', ')} · model score ${Math.round((candidate.nerScore || 0) * 100)}%${candidate.source === 'manual' ? ' · manual' : ''}` : `${candidate.category.replaceAll('_', ' ').toLowerCase()} · ${candidate.source}`} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'}</p>
+                    {candidate.signals && <p className="candidate-location">Ollaya {candidate.scoringModel || 'fallback'} · identifier: {candidate.signals.isIdentifier ? `${candidate.signals.isIdentifier.answer} (${Math.round(candidate.signals.isIdentifier.probabilityYes * 100)}% yes)` : 'unavailable'} · operational significance: {candidate.signals.hasOperationalSignificance ? `${candidate.signals.hasOperationalSignificance.answer} (${Math.round(candidate.signals.hasOperationalSignificance.probabilityYes * 100)}% yes)` : 'unavailable'}{candidate.reasons?.length ? ` · ${candidate.reasons.join('; ')}` : ''}</p>}
                     {candidate.occurrences[0] && <p className="candidate-location">{candidate.occurrences[0].location}{candidate.occurrencesTruncated ? ' · locations truncated' : ''}</p>}
                     <div className="graph-actions">
                       <button className={`small-btn ${candidate.decision === 'included' ? 'primary' : ''}`} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'included' ? 'suggested' : 'included')}>{candidate.decision === 'included' ? 'Included' : 'Include'}</button>

@@ -1,5 +1,16 @@
 export function getVisibleCandidates(candidates, level) {
-  return candidates.filter((candidate) => candidate.level >= 2 && candidate.level <= level);
+  const visible = candidates.filter((candidate) => candidate.level >= 2 && candidate.level <= level);
+  const scored = visible.filter((candidate) => Number.isInteger(candidate.reviewPriority));
+  const unscored = visible.filter((candidate) => !Number.isInteger(candidate.reviewPriority));
+  scored.sort((first, second) => second.reviewPriority - first.reviewPriority);
+  return [...scored, ...unscored];
+}
+
+export function isCandidateAutoSuggested(candidate) {
+  if (candidate.decision === 'excluded') return false;
+  if (candidate.pinned) return candidate.decision === 'included';
+  if (candidate.redactionConfidence != null) return true;
+  return candidate.scoreStatus !== 'complete';
 }
 
 export function getCandidateDecisionCounts(candidates) {

@@ -26,6 +26,7 @@ from .folder_picker import (
 )
 from .key_store import KeyStoreUnavailable, OSKeyringProjectKeyStore, ProjectKeyStore
 from .model_manager import LocalModelManager, ModelManagerError
+from .ollaya_scoring import LocalOllayaScorer
 from .page_preview import PagePreviewError
 from .projects import ProjectError, ProjectService
 from .similarity_manager import LocalSimilarityManager
@@ -171,6 +172,7 @@ def create_app(
     frontend_dist: Path = FRONTEND_DIST,
     key_store: ProjectKeyStore | None = None,
     models_directory: Path | None = None,
+    ollaya_scorer: LocalOllayaScorer | None = None,
 ) -> FastAPI:
     """Create the local API and, after a frontend build, serve its static UI."""
     app = FastAPI(
@@ -188,11 +190,13 @@ def create_app(
     app.state.active_project_directory = None
     app.state.model_manager = LocalModelManager(models_directory)
     app.state.similarity_manager = LocalSimilarityManager(models_directory)
+    app.state.ollaya_scorer = ollaya_scorer or LocalOllayaScorer()
     app.state.project_service = (
         ProjectService(
             key_store,
             app.state.model_manager.extract_entities,
             app.state.similarity_manager.propose,
+            app.state.ollaya_scorer,
         )
         if key_store is not None
         else None
@@ -297,6 +301,10 @@ def create_app(
     def minilm_model_status() -> dict[str, object]:
         return app.state.similarity_manager.status()
 
+    @app.get("/api/models/ollaya/status")
+    def ollaya_model_status() -> dict[str, object]:
+        return app.state.ollaya_scorer.status()
+
     @app.post("/api/models/minilm/download")
     def download_minilm_model(payload: ModelDownloadRequest) -> dict[str, object]:
         try:
@@ -317,6 +325,7 @@ def create_app(
                 OSKeyringProjectKeyStore(),
                 app.state.model_manager.extract_entities,
                 app.state.similarity_manager.propose,
+                app.state.ollaya_scorer,
             )
         return app.state.project_service
 

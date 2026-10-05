@@ -1,6 +1,6 @@
 # Ollaya Yes/No Redaction Scoring Plan
 
-**Status:** proposed design; implementation and model validation not started.  
+**Status:** core backend/UI integration implemented with local Ollaya CLI and `von:1.1`; cancellation and quality/calibration evaluation remain pending.
 **Product:** Blot — Local Document Obfuscation  
 **Related documents:** [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md), [`PRD Obfuscation App.md`](./PRD%20Obfuscation%20App.md)
 
@@ -16,7 +16,7 @@ Blot estimates whether the user is likely to want a term obfuscated **in this do
 - RapidFuzz and optional local MiniLM produce unconfirmed similarity proposals. Similarity alone never creates a confirmed replacement group.
 - Candidate decisions and the graph are encrypted and scoped to a document version. Manual Include/Exclude decisions are pinned.
 - The UI's current 1–10 candidate levels are heuristic defaults (email/phone/manual: 1; dates/identifiers: 2; capitalized phrases: 5). They are not calibrated probabilities.
-- The app currently has no Ollaya integration. Adding Ollaya is a new local decision layer; it must not replace extraction or silently change graph membership.
+- Ollaya scoring is implemented as a new local decision layer; it does not replace extraction or change graph membership.
 
 ## Proposed pipeline
 
@@ -57,7 +57,7 @@ Represent each question using Ollaya's returned `p_i = P(Yes)` value. Treat it a
 
 ## Intermediate input builder
 
-Use a deterministic backend function named `build_ollaya_scoring_input(...)` to construct the bounded, privacy-conscious payload for Ollaya. Call it from the candidate pipeline in `backend/app/candidate_engine.py` after candidate and occurrence extraction. This function does not make the semantic decision or calculate confidence/priority; it packages evidence from Blot's existing extraction for the two Ollaya questions.
+Use a deterministic backend function named `build_ollaya_scoring_input(...)` to construct the bounded, privacy-conscious payload for Ollaya. It lives in `backend/app/ollaya_scoring.py` and is called from `ProjectService.analyze_document_candidates` after candidate and occurrence extraction. This function does not make the semantic decision or calculate confidence/priority; it packages evidence from Blot's existing extraction for the two Ollaya questions.
 
 Proposed interface:
 
@@ -176,7 +176,7 @@ Extend each candidate result with explicit, versioned fields along these lines:
 }
 ```
 
-The model ID is a placeholder until the local Ollaya runtime is verified. Define strict validation for probability ranges, missing keys, timeouts, malformed responses, and model/version metadata. Do not allow an Ollaya response to mutate Include/Exclude decisions, candidate identity, occurrences, group membership, or replacement mappings.
+The local model ID is pinned to `von:1.1`. The adapter validates probability ranges, missing keys, timeouts, malformed responses, and model/version metadata. It does not allow an Ollaya response to mutate Include/Exclude decisions, candidate identity, occurrences, group membership, or replacement mappings.
 
 ## UI changes
 
@@ -185,7 +185,7 @@ The model ID is a placeholder until the local Ollaya runtime is verified. Define
 - Order unpinned candidates by descending Review Priority (10 first). Keep the existing slider's filtering semantics separate until its interaction with priority is specified.
 - Keep Include/Exclude and Undo available at all levels. Make pinned state visually distinct from Ollaya suggestions.
 - Show a clear local-model unavailable/fallback indicator without implying inference completed.
-- Offer an option to run/re-run semantic scoring for the current document when appropriate; scoring should be cancellable and should not impact document extraction or export approval beyond the existing graph/level invalidation rules.
+- Scoring currently runs automatically with candidate analysis; running candidate analysis again re-runs scoring. Cancellation for an in-flight scoring pass remains to be implemented.
 
 ## Implementation sequence
 
@@ -250,14 +250,16 @@ The model ID is a placeholder until the local Ollaya runtime is verified. Define
 - The app never presents Redaction Confidence or Review Priority as official classification or a guarantee of complete discovery.
 - Quality, latency, memory, and calibration targets are agreed from measurements before release claims/defaults are finalized.
 
-## Open decisions before implementation
+## Implementation decisions and remaining evaluation
 
-1. Which supported Ollaya local interface and model/version are available to the packaged Blot app?
-2. Which model meets the latency and CPU/memory target for bounded Yes/No questions?
-3. Should Ollaya scoring run automatically after candidate extraction or only when the user enables it / requests it?
-4. Should the existing slider filter by minimum Review Priority, and how should that interact with its current broader-level behavior?
-5. What calibration and false-positive acceptance targets should determine whether the max-confidence rule and priority bins are suitable?
-6. Should the first release migrate all current heuristic tiers to Ollaya priority at once, or expose Ollaya scoring as an opt-in profile until validated?
+1. **Resolved:** use the supported local `ollaya run` CLI. Blot checks `ollaya list` for the configured model before running inference, passes candidate JSON on stdin, and does not download Ollaya models.
+2. **Resolved for implementation:** use `von:1.1`, which returns typed Yes/No choices and per-choice probabilities. Runtime/resource targets and probability quality still need evaluation.
+3. **Resolved:** score every extracted candidate automatically before results are returned and persisted.
+4. **Resolved:** the existing obfuscation-level slider keeps its current filtering behavior; Ollaya Review Priority is shown and used for review ordering, not as a slider input.
+5. Calibration, false-positive burden, and acceptance thresholds remain open for evaluation.
+6. **Resolved:** preserve the existing heuristic level for filtering and fallback; expose Ollaya confidence/priority as separate fields.
+
+The integration lives in `backend/app/ollaya_scoring.py`; `ProjectService.analyze_document_candidates` invokes it for every candidate. Ollaya input is transient and bounded, while only signal answers/probabilities and derived score metadata are stored in the encrypted, version-scoped graph. Missing CLI/model, timeout, or malformed output uses the existing heuristic behavior and displays an unavailable-scoring notice. An explicit in-flight cancel control and quality/calibration acceptance remain follow-up work.
 
 ## Decision summary
 

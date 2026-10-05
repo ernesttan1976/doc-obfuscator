@@ -16,6 +16,7 @@ from backend.app import projects as projects_module
 from backend.app.key_store import KeyStoreUnavailable
 from backend.app.local_crypto import EncryptedStateError, decrypt_state, encrypt_state
 from backend.app.main import create_app
+from backend.app.ollaya_scoring import OllayaScoringError
 from backend.app.projects import ProjectError, ProjectService
 
 
@@ -37,8 +38,21 @@ class MemoryKeyStore:
         self.keys.pop(project_id, None)
 
 
+class UnavailableOllaya:
+    def status(self):
+        return {"configured": False, "model": "von:1.1", "interface": "local-cli"}
+
+    def score_candidate(self, features):
+        raise OllayaScoringError("Ollaya is disabled in deterministic service tests")
+
+
 def local_client(tmp_path, key_store=None):
-    app = create_app(tmp_path, key_store=key_store, models_directory=tmp_path / "models")
+    app = create_app(
+        tmp_path,
+        key_store=key_store,
+        models_directory=tmp_path / "models",
+        ollaya_scorer=UnavailableOllaya(),
+    )
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 54123))
     return app, httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8765")
 

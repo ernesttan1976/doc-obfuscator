@@ -35,6 +35,14 @@ from .document_adapters import (
 from .key_store import KeyStoreUnavailable, ProjectKeyStore
 from .local_crypto import atomic_write_private, decrypt_state, encrypt_state
 from .model_manager import ModelManagerError
+from .ollaya_scoring import (
+    CandidateOccurrenceIndex,
+    LocalOllayaScorer,
+    OllayaScoringError,
+    build_ollaya_scoring_input,
+    should_auto_suggest,
+    unavailable_score,
+)
 from .page_preview import render_docx_to_pdf
 from .portable_backup import (
     PortableBackupError,
@@ -102,10 +110,12 @@ class ProjectService:
         contextual_proposer: Callable[
             [tuple[CandidateBlock, ...], list[dict[str, object]]], list[dict[str, object]]
         ] | None = None,
+        ollaya_scorer: LocalOllayaScorer | None = None,
     ) -> None:
         self.key_store = key_store
         self.entity_extractor = entity_extractor
         self.contextual_proposer = contextual_proposer
+        self.ollaya_scorer = ollaya_scorer
         self._export_plans: dict[str, dict[str, Any]] = {}
         self._export_lock = threading.RLock()
         self._restore_plans: dict[str, dict[str, Any]] = {}
@@ -249,7 +259,7 @@ class ProjectService:
         nodes, groups, edges = self._scoped_graph(state, document_id, original_version_id)
         selected = [
             node for node in nodes
-            if 2 <= int(node.get("level", 10)) <= level and node.get("decision") != "excluded"
+            if 2 <= int(node.get("level", 10)) <= level and should_auto_suggest(node)
         ]
         if not selected:
             raise ProjectError("No candidates are selected at this obfuscation level. Increase the level to include more terms.")
@@ -1016,6 +1026,33 @@ class ProjectService:
             [*retained_manual_terms, *(manual_terms or [])],
             ner_entities=ner_entities,
         )
+        ollaya_failures = 0
+        ollaya_scored_count = 0
+        if self.ollaya_scorer is not None:
+            occurrence_index = CandidateOccurrenceIndex(candidates)
+            for candidate in candidates:
+                try:
+                    features = build_ollaya_scoring_input(
+                        candidate,
+                        blocks,
+                        candidates,
+                        occurrence_index=occurrence_index,
+                    )
+                    candidate.update(self.ollaya_scorer.score_candidate(features))
+                    if candidate.get("scoreStatus") in {"complete", "partial"}:
+                        ollaya_scored_count += 1
+                        if candidate.get("scoreStatus") == "partial":
+                            ollaya_failures += 1
+                    else:
+                        ollaya_failures += 1
+                except (OllayaScoringError, OSError, ValueError, TypeError, KeyError):
+                    # Scoring is advisory and must never block document analysis.
+                    candidate.update(unavailable_score())
+                    ollaya_failures += 1
+        else:
+            ollaya_failures = len(candidates)
+            for candidate in candidates:
+                candidate.update(unavailable_score())
         similarity_warning = None
         contextual_proposals = []
         try:
@@ -1048,6 +1085,17 @@ class ProjectService:
             "nerWarning": ner_warning,
             "similarityProposalCount": sum("minilm" in proposal.get("scores", {}) for proposal in proposals),
             "similarityWarning": similarity_warning,
+            "ollayaStatus": (
+                "unavailable" if candidates and ollaya_scored_count == 0
+                else "partial" if ollaya_failures
+                else "ready"
+            ),
+            "ollayaWarning": (
+                "Local Ollaya scoring was unavailable for some or all candidates; heuristic levels remain as fallback."
+                if ollaya_failures
+                else None
+            ),
+            "ollayaScoredCount": ollaya_scored_count,
         }
 
     def set_candidate_decision(

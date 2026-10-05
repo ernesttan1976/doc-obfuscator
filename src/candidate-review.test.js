@@ -35,6 +35,18 @@ test('Include and Exclude decisions do not bypass the selected priority level', 
   assert.deepEqual(getVisibleCandidates(candidates, 1), []);
 });
 
+test('candidates with Ollaya review priorities are ordered highest review priority first', () => {
+  const scored = [
+    { id: 'priority-three', level: 2, reviewPriority: 3 },
+    { id: 'priority-ten', level: 8, reviewPriority: 10 },
+    { id: 'priority-six', level: 5, reviewPriority: 6 },
+    { id: 'unscored', level: 4 },
+  ];
+  assert.deepEqual(getVisibleCandidates(scored, 10).map(({ id }) => id), [
+    'priority-ten', 'priority-six', 'priority-three', 'unscored',
+  ]);
+});
+
 test('review counts cover all candidates and do not change with the selected level', () => {
   assert.deepEqual(getCandidateDecisionCounts(candidates), {
     suggested: 5,
