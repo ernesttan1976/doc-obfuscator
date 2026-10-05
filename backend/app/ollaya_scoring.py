@@ -16,7 +16,7 @@ from typing import Any
 
 from .candidate_engine import CandidateBlock
 
-SCORING_METHOD = "ollaya_yes_no_v2"
+SCORING_METHOD = "ollaya_yes_no_v3"
 SCORING_MODEL = "von:1.1"
 MAX_CONTEXT_CHARS = 192
 MAX_CONTEXT_WINDOW_CHARS = 192
@@ -32,14 +32,6 @@ _QUESTIONS = {
             "No": "It does not identify a named entity.",
         },
     },
-    "is_organizational_term": {
-        "type": "choice",
-        "instructions": "Is the candidate the name of an organization in context?",
-        "criteria": {
-            "Yes": "It identifies a company, agency, institution, team, or other organization.",
-            "No": "It does not identify an organization.",
-        },
-    },
     "has_operational_significance": {
         "type": "choice",
         "instructions": "Does the candidate identify an operational concept in context?",
@@ -53,12 +45,10 @@ _QUESTIONS = {
 _SENTENCE_BOUNDARY = re.compile(r"[.!?;\n]")
 _SIGNAL_NAMES = {
     "is_identifier": "isIdentifier",
-    "is_organizational_term": "isOrganizationalTerm",
     "has_operational_significance": "hasOperationalSignificance",
 }
 _SIGNAL_REASONS = {
     "is_identifier": "Identifies a named entity in context",
-    "is_organizational_term": "Identifies an organization in context",
     "has_operational_significance": "Has operational significance in context",
 }
 _LOGGER = logging.getLogger(__name__)

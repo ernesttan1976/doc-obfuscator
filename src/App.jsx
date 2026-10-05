@@ -138,7 +138,6 @@ export default function App() {
   const [candidateBulkBusy, setCandidateBulkBusy] = useState(false);
   const [signalThresholds, setSignalThresholds] = useState({
     isIdentifier: 80,
-    isOrganizationalTerm: 80,
     hasOperationalSignificance: 80,
   });
   const [toast, setToast] = useState('');
@@ -1683,7 +1682,6 @@ export default function App() {
                   <p>Add candidates by Ollaya confidence, then apply one decision to the selection. Clear the selection to start over; unavailable scores do not match.</p>
                   {[
                     ['isIdentifier', 'Identifier / named entity'],
-                    ['isOrganizationalTerm', 'Organizational term'],
                     ['hasOperationalSignificance', 'Operational significance'],
                   ].map(([signalName, label]) => {
                     const matchingCount = getCandidatesMatchingSignal(visibleCandidates, signalName, signalThresholds[signalName]).length;
@@ -1720,7 +1718,7 @@ export default function App() {
                     <label className="candidate-group-select"><input type="checkbox" aria-label={`Select ${candidate.term} for a manual group`} checked={selectedCandidateIds.includes(candidate.id)} disabled={activeFile.candidateLoading || candidateBulkBusy || groupedCandidateIds.has(candidate.id)} onChange={(event) => setSelectedCandidateIds((current) => event.target.checked ? [...current, candidate.id] : current.filter((id) => id !== candidate.id))} />Group with another candidate</label>
                     <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">Level {candidate.level} · Review Priority {candidate.reviewPriority == null ? '—' : `${candidate.reviewPriority}/10`}</span></div>
                     <p className="graph-reason">Redaction confidence {candidate.redactionConfidence == null ? candidate.scoreStatus === 'complete' ? 'no affirmative signal' : 'unavailable' : `${Math.round(candidate.redactionConfidence * 100)}%`}{candidate.scoreStatus === 'complete' && candidate.redactionConfidence == null ? ' · not auto-suggested' : ''} · {candidate.nerLabels?.length ? `NER · ${candidate.nerLabels.join(', ')} · model score ${Math.round((candidate.nerScore || 0) * 100)}%${candidate.source === 'manual' ? ' · manual' : ''}` : `${candidate.category.replaceAll('_', ' ').toLowerCase()} · ${candidate.source}`} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'}</p>
-                    {candidate.signals && <p className="candidate-location">Ollaya {candidate.scoringModel || 'fallback'} · identifier: {candidate.signals.isIdentifier ? `${candidate.signals.isIdentifier.answer} (${Math.round(candidate.signals.isIdentifier.probabilityYes * 100)}% yes)` : 'unavailable'} · organizational term: {candidate.signals.isOrganizationalTerm ? `${candidate.signals.isOrganizationalTerm.answer} (${Math.round(candidate.signals.isOrganizationalTerm.probabilityYes * 100)}% yes)` : 'unavailable'} · operational significance: {candidate.signals.hasOperationalSignificance ? `${candidate.signals.hasOperationalSignificance.answer} (${Math.round(candidate.signals.hasOperationalSignificance.probabilityYes * 100)}% yes)` : 'unavailable'}{candidate.reasons?.length ? ` · ${candidate.reasons.join('; ')}` : ''}</p>}
+                    {candidate.signals && <p className="candidate-location">Ollaya {candidate.scoringModel || 'fallback'} · identifier: {candidate.signals.isIdentifier ? `${candidate.signals.isIdentifier.answer} (${Math.round(candidate.signals.isIdentifier.probabilityYes * 100)}% yes)` : 'unavailable'} · operational significance: {candidate.signals.hasOperationalSignificance ? `${candidate.signals.hasOperationalSignificance.answer} (${Math.round(candidate.signals.hasOperationalSignificance.probabilityYes * 100)}% yes)` : 'unavailable'}{candidate.reasons?.length ? ` · ${candidate.reasons.join('; ')}` : ''}</p>}
                     {candidate.occurrences[0] && <p className="candidate-location">{candidate.occurrences[0].location}{candidate.occurrencesTruncated ? ' · locations truncated' : ''}</p>}
                     <div className="graph-actions">
                       <button className={`small-btn ${candidate.decision === 'included' ? 'primary' : ''}`} disabled={activeFile.candidateLoading || candidateBulkBusy} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'included' ? 'suggested' : 'included')}>{candidate.decision === 'included' ? 'Included' : 'Include'}</button>

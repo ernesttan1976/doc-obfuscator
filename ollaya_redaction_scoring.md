@@ -6,7 +6,7 @@
 
 ## Goal
 
-Use Ollaya's local decision model to answer three semantic yes/no questions about each already-extracted candidate term: whether it is a named-entity identifier, an organizational term, and operationally significant. If any answer is Yes, use the highest affirmative Yes-confidence as the candidate's **Redaction Confidence**. Convert that confidence into the specified **Review Priority** from 1/10 to 10/10. Deterministic extraction data supplies context to Ollaya but is not an additional scoring signal.
+Use Ollaya's local decision model to answer two semantic yes/no questions about each already-extracted candidate term: whether it is a named-entity identifier and whether it is operationally significant. If either answer is Yes, use the highest affirmative Yes-confidence as the candidate's **Redaction Confidence**. Convert that confidence into the specified **Review Priority** from 1/10 to 10/10. Deterministic extraction data supplies context to Ollaya but is not an additional scoring signal.
 
 Blot estimates whether the user is likely to want a term obfuscated **in this document and context**. It does not determine whether a term is formally classified, confidential, or safe to disclose. Confidence and priority are review aids, not guarantees that every sensitive detail has been found.
 
@@ -49,16 +49,15 @@ Ask narrow, candidate-specific questions using only the minimum term/context nee
 | Signal | Yes means | Score use |
 | --- | --- | --- |
 | `is_identifier` | Does the term identify a person, organization, project, unit, location, system, codeword, or other named entity in this context? | Redaction-positive |
-| `is_organizational_term` | Is the term the name of a company, agency, institution, team, or other organization in this context? | Redaction-positive |
 | `has_operational_significance` | Does the term name or distinguish an operational activity, capability, vulnerability, plan, or resource in this context? | Redaction-positive |
 
-Do not ask Ollaya to label a term “confidential.” The semantic signals are exactly these three; the only request state is the candidate term and at most one short context snippet.
+Do not ask Ollaya to label a term “confidential.” The semantic signals are exactly these two; the only request state is the candidate term and at most one short context snippet.
 
 Represent each question using Ollaya's returned `p_i = P(Yes)` value. Treat it as a model-reported probability estimate, not as calibrated confidence until validated. A missing answer, service error, or malformed response is **unknown**, not an implicit No. Use the returned Yes probabilities in scoring.
 
 ## Intermediate input builder
 
-Use a deterministic backend function named `build_ollaya_scoring_input(...)` to construct the bounded, privacy-conscious payload for Ollaya. It lives in `backend/app/ollaya_scoring.py` and is called from `ProjectService.analyze_document_candidates` after candidate and occurrence extraction. This function does not make the semantic decision or calculate confidence/priority; it packages evidence from Blot's existing extraction for the three Ollaya questions.
+Use a deterministic backend function named `build_ollaya_scoring_input(...)` to construct the bounded, privacy-conscious payload for Ollaya. It lives in `backend/app/ollaya_scoring.py` and is called from `ProjectService.analyze_document_candidates` after candidate and occurrence extraction. This function does not make the semantic decision or calculate confidence/priority; it packages evidence from Blot's existing extraction for the two Ollaya questions.
 
 Proposed interface:
 
@@ -85,7 +84,7 @@ Example payload:
 {"candidate":"Project Falcon","context":"... briefing for Project Falcon begins ..."}
 ```
 
-The Ollaya adapter consumes this payload and asks the three questions from the table. Keep the input builder, Ollaya adapter, and final score function separate so each can be unit-tested independently.
+The Ollaya adapter consumes this payload and asks the two questions from the table. Keep the input builder, Ollaya adapter, and final score function separate so each can be unit-tested independently.
 
 ## Confidence and priority
 
@@ -156,11 +155,10 @@ Extend each candidate result with explicit, versioned fields along these lines:
 {
   "redactionConfidence": 0.93,
   "reviewPriority": 2,
-  "scoringMethod": "ollaya_yes_no_v2",
+  "scoringMethod": "ollaya_yes_no_v3",
   "scoringModel": "<verified-local-model-id>",
   "signals": {
     "isIdentifier": {"answer": "Yes", "probabilityYes": 0.93},
-    "isOrganizationalTerm": {"answer": "Yes", "probabilityYes": 0.89},
     "hasOperationalSignificance": {"answer": "Yes", "probabilityYes": 0.79}
   },
   "reasons": ["Named project identifier", "Operational context"],
@@ -173,7 +171,7 @@ The local model ID is pinned to `von:1.1`. The adapter validates probability ran
 ## UI changes
 
 - Label the model result **Redaction confidence** and the derived bucket **Review Priority**; avoid “confidentiality probability.”
-- Show the confidence, priority, a short “Why suggested” explanation, and the three Ollaya answers/probabilities. Distinguish semantic judgments from deterministic input facts and explicit user decisions.
+- Show the confidence, priority, a short “Why suggested” explanation, and the two Ollaya answers/probabilities. Distinguish semantic judgments from deterministic input facts and explicit user decisions.
 - Order unpinned candidates by descending Review Priority (10 first). Keep the existing slider's filtering semantics separate until its interaction with priority is specified.
 - Keep Include/Exclude and Undo available at all levels. Make pinned state visually distinct from Ollaya suggestions.
 - Show a clear local-model unavailable/fallback indicator without implying inference completed.
