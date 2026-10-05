@@ -53,6 +53,9 @@ def test_signal_validation_confidence_and_automatic_suggestion_rules():
             "is_identifier": {
                 "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.83, "No": 0.17}
             },
+            "is_organizational_term": {
+                "type": "choice", "choice": "No", "probabilities": {"Yes": 0.12, "No": 0.88}
+            },
             "has_operational_significance": {
                 "type": "choice", "choice": "No", "probabilities": {"Yes": 0.23, "No": 0.77}
             },
@@ -67,6 +70,7 @@ def test_signal_validation_confidence_and_automatic_suggestion_rules():
 
     no_result = score_result_from_signals({
         "isIdentifier": {"answer": "No", "probabilityYes": 0.2},
+        "isOrganizationalTerm": {"answer": "No", "probabilityYes": 0.1},
         "hasOperationalSignificance": {"answer": "No", "probabilityYes": 0.1},
     })
     assert no_result["redactionConfidence"] is None
@@ -102,6 +106,20 @@ def test_contradictory_or_missing_signal_is_unavailable_not_a_no():
     assert score_result_from_signals(partial)["scoreStatus"] == "partial"
 
 
+def test_organizational_term_signal_is_scored_independently():
+    signals = validate_ollaya_response({
+        "model": "von:1.1",
+        "answers": {
+            "is_organizational_term": {
+                "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.87, "No": 0.13}
+            },
+        },
+    })
+
+    assert signals == {"isOrganizationalTerm": {"answer": "Yes", "probabilityYes": 0.87}}
+    assert score_result_from_signals(signals)["redactionConfidence"] == 0.87
+
+
 def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
     captured = {}
 
@@ -118,6 +136,9 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
                 "answers": {
                     "is_identifier": {
                         "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.7, "No": 0.3}
+                    },
+                    "is_organizational_term": {
+                        "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.68, "No": 0.32}
                     },
                     "has_operational_significance": {
                         "type": "choice", "choice": "No", "probabilities": {"Yes": 0.3, "No": 0.7}
@@ -144,7 +165,7 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
     assert len(records) == 1
     assert records[0].ollaya_model == "von:1.1"
     assert records[0].ollaya_outcome == "complete"
-    assert records[0].ollaya_signal_count == 2
+    assert records[0].ollaya_signal_count == 3
     log_line = records[0].getMessage()
     log_entry = json.loads(log_line)
     assert "\n" not in log_line
@@ -171,6 +192,9 @@ def test_local_cli_caches_successful_scores_for_identical_inputs(caplog):
                 "answers": {
                     "is_identifier": {
                         "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.8, "No": 0.2}
+                    },
+                    "is_organizational_term": {
+                        "type": "choice", "choice": "No", "probabilities": {"Yes": 0.2, "No": 0.8}
                     },
                     "has_operational_significance": {
                         "type": "choice", "choice": "No", "probabilities": {"Yes": 0.2, "No": 0.8}
@@ -238,6 +262,7 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
             self.payloads.append(features)
             return score_result_from_signals({
                 "isIdentifier": {"answer": "No", "probabilityYes": 0.1},
+                "isOrganizationalTerm": {"answer": "No", "probabilityYes": 0.05},
                 "hasOperationalSignificance": {"answer": "No", "probabilityYes": 0.2},
             })
 

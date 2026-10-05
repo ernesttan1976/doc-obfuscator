@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   getCandidateDecisionCounts,
+  getCandidatesMatchingSignal,
   getCandidatesNotSelectedAtLevel,
   getVisibleCandidates,
   upsertCandidate,
@@ -72,6 +73,23 @@ test('unselected candidates are counted outside the active priority range', () =
   assert.equal(getCandidatesNotSelectedAtLevel(candidates, 1), candidates.length);
   assert.equal(getCandidatesNotSelectedAtLevel(candidates, 5), 4);
   assert.equal(getCandidatesNotSelectedAtLevel(candidates, 10), 1);
+});
+
+test('signal selection requires an affirmative answer and meets the requested confidence threshold', () => {
+  const scored = [
+    { id: 'strong-identifier', signals: { isIdentifier: { answer: 'Yes', probabilityYes: 0.91 } } },
+    { id: 'weak-identifier', signals: { isIdentifier: { answer: 'Yes', probabilityYes: 0.72 } } },
+    { id: 'negative', signals: { isIdentifier: { answer: 'No', probabilityYes: 0.18 } } },
+    { id: 'missing', signals: {} },
+  ];
+
+  assert.deepEqual(getCandidatesMatchingSignal(scored, 'isIdentifier', 80).map(({ id }) => id), [
+    'strong-identifier',
+  ]);
+  assert.deepEqual(getCandidatesMatchingSignal(scored, 'isIdentifier', 50).map(({ id }) => id), [
+    'strong-identifier', 'weak-identifier',
+  ]);
+  assert.deepEqual(getCandidatesMatchingSignal(scored, 'isIdentifier', 101), []);
 });
 
 test('page term matching is case-insensitive and prefers the longest overlapping candidate', () => {

@@ -165,6 +165,13 @@ class CandidateDecisionRequest(BaseModel):
     decision: str = Field(min_length=1, max_length=20)
 
 
+class CandidateBulkDecisionRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
+    candidate_ids: list[str] = Field(min_length=1, max_length=1000)
+    decision: str = Field(min_length=1, max_length=20)
+
+
 class CandidateGroupRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=4096)
     document_id: str = Field(min_length=1, max_length=100)
@@ -586,6 +593,21 @@ def create_app(
                 payload.candidate_id,
                 payload.decision,
             )
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except (CandidateError, ProjectError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/candidate-decisions")
+    def update_project_candidate_decisions(payload: CandidateBulkDecisionRequest) -> dict[str, object]:
+        try:
+            candidates = project_service().set_candidate_decisions(
+                payload.directory,
+                payload.document_id,
+                payload.candidate_ids,
+                payload.decision,
+            )
+            return {"candidates": candidates}
         except KeyStoreUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except (CandidateError, ProjectError) as exc:

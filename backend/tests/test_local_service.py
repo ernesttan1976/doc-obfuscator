@@ -595,6 +595,48 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
 
 
 @pytest.mark.anyio
+async def test_bulk_candidate_decisions_update_once_and_reject_unknown_ids_atomically(tmp_path):
+    root = tmp_path / "project"
+    source = tmp_path / "brief.txt"
+    root.mkdir()
+    source.write_text("Alex Tan met Jordan Lee. Contact alex@example.test.", encoding="utf-8")
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    async with client_context as client:
+        headers = {"X-Local-App-Token": app.state.local_token}
+        await client.post("/api/projects", json={"name": "Project", "directory": str(root)}, headers=headers)
+        imported = await client.post(
+            "/api/projects/documents",
+            json={"directory": str(root), "files": [str(source)]},
+            headers=headers,
+        )
+        request = {"directory": str(root), "document_id": imported.json()["documents"][0]["id"]}
+        analysis = await client.post("/api/projects/document-candidates", json=request, headers=headers)
+        candidates = analysis.json()["candidates"]
+        names = {candidate["term"]: candidate for candidate in candidates}
+        bulk = await client.post(
+            "/api/projects/candidate-decisions",
+            json={**request, "candidate_ids": [names["Alex Tan"]["id"], names["Jordan Lee"]["id"]], "decision": "included"},
+            headers=headers,
+        )
+        invalid = await client.post(
+            "/api/projects/candidate-decisions",
+            json={**request, "candidate_ids": [names["alex@example.test"]["id"], "unknown-candidate"], "decision": "excluded"},
+            headers=headers,
+        )
+        repeated = await client.post("/api/projects/document-candidates", json=request, headers=headers)
+
+    assert bulk.status_code == 200
+    assert {candidate["id"] for candidate in bulk.json()["candidates"] if candidate["decision"] == "included"} >= {
+        names["Alex Tan"]["id"], names["Jordan Lee"]["id"],
+    }
+    assert invalid.status_code == 400
+    persisted = {candidate["id"]: candidate for candidate in repeated.json()["candidates"]}
+    assert persisted[names["Alex Tan"]["id"]]["decision"] == "included"
+    assert persisted[names["Jordan Lee"]["id"]]["decision"] == "included"
+    assert persisted[names["alex@example.test"]["id"]]["decision"] == "suggested"
+
+
+@pytest.mark.anyio
 async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immutable_version(tmp_path):
     root = tmp_path / "project"
     source = tmp_path / "brief.md"

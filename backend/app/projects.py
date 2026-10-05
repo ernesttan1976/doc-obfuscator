@@ -1115,6 +1115,45 @@ class ProjectService:
         self.save_private_state(root, state)
         return updated
 
+    def set_candidate_decisions(
+        self,
+        directory: str | Path,
+        document_id: str,
+        candidate_ids: list[str],
+        decision: str,
+    ) -> list[dict[str, object]]:
+        root = self._validate_directory(directory)
+        if decision not in {"included", "excluded", "suggested"}:
+            raise CandidateError("Candidate decision must be included, excluded, or suggested.")
+        requested_ids = list(dict.fromkeys(candidate_ids))
+        if not requested_ids:
+            raise CandidateError("Choose at least one candidate to update.")
+
+        version_id = self._original_version_id(root, document_id)
+        state = self.load_private_state(root)
+        graph = state.setdefault("graph", {"nodes": [], "edges": [], "decisions": {}})
+        scoped_nodes = [
+            node for node in graph.setdefault("nodes", [])
+            if node.get("documentId") == document_id and node.get("versionId") == version_id
+        ]
+        scoped_ids = {str(node.get("id", "")) for node in scoped_nodes}
+        if any(candidate_id not in scoped_ids for candidate_id in requested_ids):
+            raise CandidateError("One or more selected candidates were not found in this document version.")
+
+        groups = graph.setdefault("groups", [])
+        for candidate_id in requested_ids:
+            decide_candidate(scoped_nodes, candidate_id, decision)
+            self._propagate_group_decision(
+                scoped_nodes,
+                groups,
+                document_id,
+                version_id,
+                candidate_id,
+                decision,
+            )
+        self.save_private_state(root, state)
+        return scoped_nodes
+
     @staticmethod
     def _propagate_group_decision(nodes, groups, document_id, version_id, candidate_id, decision) -> None:
         scoped_ids = {str(node.get("id", "")) for node in nodes}

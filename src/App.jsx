@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { getCandidateDecisionCounts, getCandidatesNotSelectedAtLevel, getVisibleCandidates, isCandidateAutoSuggested, upsertCandidate } from './candidate-review.js';
+import { getCandidateDecisionCounts, getCandidatesMatchingSignal, getCandidatesNotSelectedAtLevel, getVisibleCandidates, isCandidateAutoSuggested, upsertCandidate } from './candidate-review.js';
 import { findPageTermMatches, mapClientPointToLayer, mapClientRectToLayer } from './page-highlights.js';
 import './stage3-preview.css';
 
@@ -134,6 +134,13 @@ export default function App() {
   const [manualPhrase, setManualPhrase] = useState('');
   const [mergeGroupIds, setMergeGroupIds] = useState([]);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState([]);
+  const [bulkSelectedCandidateIds, setBulkSelectedCandidateIds] = useState([]);
+  const [candidateBulkBusy, setCandidateBulkBusy] = useState(false);
+  const [signalThresholds, setSignalThresholds] = useState({
+    isIdentifier: 80,
+    isOrganizationalTerm: 80,
+    hasOperationalSignificance: 80,
+  });
   const [toast, setToast] = useState('');
   const [undo, setUndo] = useState(null);
   const [termContextMenu, setTermContextMenu] = useState(null);
@@ -628,6 +635,7 @@ export default function App() {
         : file
     )));
     setSelectedCandidateIds([]);
+    setBulkSelectedCandidateIds([]);
     try {
       const response = await fetch('/api/projects/document-candidates/stream', {
         method: 'POST',
@@ -889,6 +897,46 @@ export default function App() {
     } catch (error) {
       setToast(error.message || 'Could not save this candidate decision');
     }
+  };
+
+  const applyBulkCandidateDecision = async (candidateIds, decision) => {
+    const ids = [...new Set(candidateIds)];
+    if (!ids.length || !activeFile.isProjectDocument || !localToken) return;
+    setCandidateBulkBusy(true);
+    try {
+      const response = await fetch('/api/projects/candidate-decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({
+          directory: projectDirectory,
+          document_id: activeFile.id,
+          candidate_ids: ids,
+          decision,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not update candidate decisions');
+      setExportPreview(null);
+      setFiles((current) => current.map((file) => (
+        file.id === activeFile.id ? { ...file, candidates: data.candidates } : file
+      )));
+      setBulkSelectedCandidateIds([]);
+      setToast(`${decision === 'included' ? 'Included' : 'Excluded'} ${ids.length} candidate${ids.length === 1 ? '' : 's'}`);
+    } catch (error) {
+      setToast(error.message || 'Could not update candidate decisions');
+    } finally {
+      setCandidateBulkBusy(false);
+    }
+  };
+
+  const selectCandidatesBySignal = (signalName) => {
+    const selected = getCandidatesMatchingSignal(
+      visibleCandidates,
+      signalName,
+      signalThresholds[signalName],
+    ).map((candidate) => candidate.id);
+    setBulkSelectedCandidateIds((current) => [...new Set([...current, ...selected])]);
+    setToast(`Added matching candidates to the current selection`);
   };
 
   const addManualCandidate = async (event) => {
@@ -1540,6 +1588,8 @@ export default function App() {
     setView('preview');
     setUndo(null);
     setMergeGroupIds([]);
+    setSelectedCandidateIds([]);
+    setBulkSelectedCandidateIds([]);
     setManualPhrase('');
     setToast(`Opened ${file.name} · original remains unchanged`);
     const selectedVersion = file.versions?.find((version) => version.id === file.selectedVersionId);
@@ -1568,7 +1618,7 @@ export default function App() {
             <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${projectDocuments.length} saved` : `${files.length} items`}</span></div><div className="file-list">{(currentProject ? projectDocuments : files).map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span className="file-copy"><span className="file-name">{file.name}</span><span className="file-status">{file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : ''}</span></button>)}{currentProject && projectDocuments.length === 0 && <p className="empty-file-list">No project documents yet.</p>}</div></aside>
             <section className="panel review-panel">
                <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? `${activeVersion.kind === 'original' ? 'Saved original' : activeVersion.kind === 'restored' ? 'Restored copy' : 'Obfuscated copy'} · local preview` : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="review-toolbar-actions">{activeFile.isProjectDocument && <label className="version-select">Version<select aria-label="Select document version" value={activeFile.selectedVersionId || activeFile.versionId} onChange={(event) => selectProjectVersion(event.target.value)}>{(activeFile.versions || []).map((version) => <option key={version.id} value={version.id}>{version.kind === 'original' ? 'Original' : version.kind === 'restored' ? 'Restored' : 'Obfuscated'} · {version.name}</option>)}</select></label>}<div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div></div>
-                {reviewableProjectDocument && <div className="priority-area"><fieldset className="priority-fieldset"><legend>Obfuscation level</legend><div className="priority-scale" aria-hidden="true"><span>1 · 0%</span><strong>Level {level}</strong><span>10 · 100%</span></div><input className="priority-slider" type="range" min="1" max="10" step="1" value={level} aria-label="Obfuscation level" aria-valuetext={`Level ${level}: ${level === 1 ? '0% obfuscation; no terms selected' : level === 10 ? '100% obfuscation; priorities 2 through 10 selected' : `priorities 2 through ${level} selected`}`} onChange={(event) => { setExportPreview(null); setLevel(Number(event.target.value)); }} /><p className="priority-help">Priorities run from 2 (most sensitive) to 10 (least sensitive). Level 1 selects none; level 10 selects priorities 2–10.</p></fieldset></div>}
+                 {reviewableProjectDocument && <div className="priority-area"><fieldset className="priority-fieldset"><legend>Obfuscation level</legend><div className="priority-scale" aria-hidden="true"><span>1 · 0%</span><strong>Level {level}</strong><span>10 · 100%</span></div><input className="priority-slider" type="range" min="1" max="10" step="1" value={level} aria-label="Obfuscation level" aria-valuetext={`Level ${level}: ${level === 1 ? '0% obfuscation; no terms selected' : level === 10 ? '100% obfuscation; priorities 2 through 10 selected' : `priorities 2 through ${level} selected`}`} onChange={(event) => { setExportPreview(null); setBulkSelectedCandidateIds([]); setLevel(Number(event.target.value)); }} /><p className="priority-help">Priorities run from 2 (most sensitive) to 10 (least sensitive). Level 1 selects none; level 10 selects priorities 2–10.</p></fieldset></div>}
                 {reviewableProjectDocument && <p className="sensitivity-note">Include and Exclude decisions apply only to candidates selected at this level.</p>}
                 {view === 'preview' && <p className="term-interaction-help">Click a highlighted word to include · double-click to exclude · right-click for Reset / Include / Exclude.</p>}
                 {view === 'preview' && activeFile.isProjectDocument && activeFile.previewFormat === 'DOCX' && <div className="preview page-preview-shell">
@@ -1624,10 +1674,37 @@ export default function App() {
                   <span><strong>{candidateDecisionCounts.excluded}</strong> excluded</span>
                   {notIncludedByLevelCount > 0 && <span><strong>{notIncludedByLevelCount}</strong> not selected at this level</span>}
                 </div>
+                <div className="candidate-bulk-panel" aria-label="Bulk candidate decisions">
+                  <div className="candidate-subhead">Bulk decisions · {visibleCandidates.length} shown at level {level}</div>
+                  <div className="candidate-bulk-actions">
+                    <button className="small-btn primary" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || !visibleCandidates.length} onClick={() => applyBulkCandidateDecision(visibleCandidates.map((candidate) => candidate.id), 'included')}>Include all shown</button>
+                    <button className="small-btn" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || !visibleCandidates.length} onClick={() => applyBulkCandidateDecision(visibleCandidates.map((candidate) => candidate.id), 'excluded')}>Exclude all shown</button>
+                  </div>
+                  <p>Add candidates by Ollaya confidence, then apply one decision to the selection. Clear the selection to start over; unavailable scores do not match.</p>
+                  {[
+                    ['isIdentifier', 'Identifier / named entity'],
+                    ['isOrganizationalTerm', 'Organizational term'],
+                    ['hasOperationalSignificance', 'Operational significance'],
+                  ].map(([signalName, label]) => {
+                    const matchingCount = getCandidatesMatchingSignal(visibleCandidates, signalName, signalThresholds[signalName]).length;
+                    return <div className="candidate-signal-select" key={signalName}>
+                      <label htmlFor={`threshold-${signalName}`}>{label} · Yes at least</label>
+                      <input id={`threshold-${signalName}`} type="range" min="50" max="100" step="5" value={signalThresholds[signalName]} aria-label={`${label} yes-confidence threshold percentage`} aria-valuetext={`${signalThresholds[signalName]} percent yes`} onChange={(event) => setSignalThresholds((current) => ({ ...current, [signalName]: Number(event.target.value) }))} />
+                      <output htmlFor={`threshold-${signalName}`}>{signalThresholds[signalName]}%</output>
+                      <button className="small-btn" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || matchingCount === 0} onClick={() => selectCandidatesBySignal(signalName)}>Add {matchingCount}</button>
+                    </div>;
+                  })}
+                  <div className="candidate-bulk-selected">
+                    <span>{bulkSelectedCandidateIds.length} selected</span>
+                    <button className="small-btn" type="button" disabled={!bulkSelectedCandidateIds.length || candidateBulkBusy} onClick={() => setBulkSelectedCandidateIds([])}>Clear</button>
+                    <button className="small-btn primary" type="button" disabled={!bulkSelectedCandidateIds.length || candidateBulkBusy || activeFile.candidateLoading} onClick={() => applyBulkCandidateDecision(bulkSelectedCandidateIds, 'included')}>Include selected</button>
+                    <button className="small-btn" type="button" disabled={!bulkSelectedCandidateIds.length || candidateBulkBusy || activeFile.candidateLoading} onClick={() => applyBulkCandidateDecision(bulkSelectedCandidateIds, 'excluded')}>Exclude selected</button>
+                  </div>
+                </div>
                 <div className="candidate-subsection">
                   <div className="candidate-subhead">Manual groups</div>
                   <p>Select at least two ungrouped candidates to apply decisions to them together.</p>
-                  <button className="small-btn" type="button" disabled={activeFile.candidateLoading || selectedCandidateIds.length < 2} onClick={() => applyCandidateGroupOperation('add', selectedCandidateIds)}>
+                  <button className="small-btn" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || selectedCandidateIds.length < 2} onClick={() => applyCandidateGroupOperation('add', selectedCandidateIds)}>
                     Group selected candidates ({selectedCandidateIds.length})
                   </button>
                 </div>
@@ -1639,14 +1716,15 @@ export default function App() {
                   {activeFile.nerWarning && <p className="candidate-error" role="status">{activeFile.nerWarning}</p>}
                   {activeFile.ollayaWarning && <p className="candidate-error" role="status">{activeFile.ollayaWarning}</p>}
                   {visibleCandidates.map((candidate) => <div className="graph-card candidate-card" key={candidate.id}>
-                    <label className="candidate-group-select"><input type="checkbox" aria-label={`Select ${candidate.term} for a manual group`} checked={selectedCandidateIds.includes(candidate.id)} disabled={activeFile.candidateLoading || groupedCandidateIds.has(candidate.id)} onChange={(event) => setSelectedCandidateIds((current) => event.target.checked ? [...current, candidate.id] : current.filter((id) => id !== candidate.id))} />Group with another candidate</label>
+                    <label className="candidate-bulk-select"><input type="checkbox" aria-label={`Select ${candidate.term} for a bulk Include or Exclude decision`} checked={bulkSelectedCandidateIds.includes(candidate.id)} disabled={activeFile.candidateLoading || candidateBulkBusy} onChange={(event) => setBulkSelectedCandidateIds((current) => event.target.checked ? [...new Set([...current, candidate.id])] : current.filter((id) => id !== candidate.id))} />Select for Include / Exclude</label>
+                    <label className="candidate-group-select"><input type="checkbox" aria-label={`Select ${candidate.term} for a manual group`} checked={selectedCandidateIds.includes(candidate.id)} disabled={activeFile.candidateLoading || candidateBulkBusy || groupedCandidateIds.has(candidate.id)} onChange={(event) => setSelectedCandidateIds((current) => event.target.checked ? [...current, candidate.id] : current.filter((id) => id !== candidate.id))} />Group with another candidate</label>
                     <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">Level {candidate.level} · Review Priority {candidate.reviewPriority == null ? '—' : `${candidate.reviewPriority}/10`}</span></div>
                     <p className="graph-reason">Redaction confidence {candidate.redactionConfidence == null ? candidate.scoreStatus === 'complete' ? 'no affirmative signal' : 'unavailable' : `${Math.round(candidate.redactionConfidence * 100)}%`}{candidate.scoreStatus === 'complete' && candidate.redactionConfidence == null ? ' · not auto-suggested' : ''} · {candidate.nerLabels?.length ? `NER · ${candidate.nerLabels.join(', ')} · model score ${Math.round((candidate.nerScore || 0) * 100)}%${candidate.source === 'manual' ? ' · manual' : ''}` : `${candidate.category.replaceAll('_', ' ').toLowerCase()} · ${candidate.source}`} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'}</p>
-                    {candidate.signals && <p className="candidate-location">Ollaya {candidate.scoringModel || 'fallback'} · identifier: {candidate.signals.isIdentifier ? `${candidate.signals.isIdentifier.answer} (${Math.round(candidate.signals.isIdentifier.probabilityYes * 100)}% yes)` : 'unavailable'} · operational significance: {candidate.signals.hasOperationalSignificance ? `${candidate.signals.hasOperationalSignificance.answer} (${Math.round(candidate.signals.hasOperationalSignificance.probabilityYes * 100)}% yes)` : 'unavailable'}{candidate.reasons?.length ? ` · ${candidate.reasons.join('; ')}` : ''}</p>}
+                    {candidate.signals && <p className="candidate-location">Ollaya {candidate.scoringModel || 'fallback'} · identifier: {candidate.signals.isIdentifier ? `${candidate.signals.isIdentifier.answer} (${Math.round(candidate.signals.isIdentifier.probabilityYes * 100)}% yes)` : 'unavailable'} · organizational term: {candidate.signals.isOrganizationalTerm ? `${candidate.signals.isOrganizationalTerm.answer} (${Math.round(candidate.signals.isOrganizationalTerm.probabilityYes * 100)}% yes)` : 'unavailable'} · operational significance: {candidate.signals.hasOperationalSignificance ? `${candidate.signals.hasOperationalSignificance.answer} (${Math.round(candidate.signals.hasOperationalSignificance.probabilityYes * 100)}% yes)` : 'unavailable'}{candidate.reasons?.length ? ` · ${candidate.reasons.join('; ')}` : ''}</p>}
                     {candidate.occurrences[0] && <p className="candidate-location">{candidate.occurrences[0].location}{candidate.occurrencesTruncated ? ' · locations truncated' : ''}</p>}
                     <div className="graph-actions">
-                      <button className={`small-btn ${candidate.decision === 'included' ? 'primary' : ''}`} disabled={activeFile.candidateLoading} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'included' ? 'suggested' : 'included')}>{candidate.decision === 'included' ? 'Included' : 'Include'}</button>
-                      <button className={`small-btn ${candidate.decision === 'excluded' ? 'selected' : ''}`} disabled={activeFile.candidateLoading} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'excluded' ? 'suggested' : 'excluded')}>{candidate.decision === 'excluded' ? 'Excluded' : 'Exclude'}</button>
+                      <button className={`small-btn ${candidate.decision === 'included' ? 'primary' : ''}`} disabled={activeFile.candidateLoading || candidateBulkBusy} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'included' ? 'suggested' : 'included')}>{candidate.decision === 'included' ? 'Included' : 'Include'}</button>
+                      <button className={`small-btn ${candidate.decision === 'excluded' ? 'selected' : ''}`} disabled={activeFile.candidateLoading || candidateBulkBusy} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'excluded' ? 'suggested' : 'excluded')}>{candidate.decision === 'excluded' ? 'Excluded' : 'Exclude'}</button>
                     </div>
                   </div>)}
                   {!activeFile.candidateLoading && !activeFile.candidateError && visibleCandidates.length === 0 && <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>{activeFile.previewError ? 'Candidate analysis requires a readable local preview.' : candidates.length ? level === 1 ? 'Level 1 is 0% obfuscation. Increase the level to include priority 2 and above.' : `No candidates at priorities 2–${level}; increase the level to include less-sensitive terms.` : 'No candidates found in supported editable text.'}</p>}

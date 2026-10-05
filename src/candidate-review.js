@@ -31,3 +31,14 @@ export function getCandidateDecisionCounts(candidates) {
 export function getCandidatesNotSelectedAtLevel(candidates, level) {
   return candidates.filter((candidate) => candidate.level < 2 || candidate.level > level).length;
 }
+
+export function getCandidatesMatchingSignal(candidates, signalName, thresholdPercent) {
+  const threshold = Number(thresholdPercent);
+  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 100) return [];
+  return candidates.filter((candidate) => {
+    const signal = candidate.signals?.[signalName];
+    return signal?.answer === 'Yes'
+      && Number.isFinite(signal.probabilityYes)
+      && signal.probabilityYes * 100 >= threshold;
+  });
+}
