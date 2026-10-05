@@ -9,7 +9,7 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
   throw 'Install Node.js LTS (which includes npm) and rerun this setup.'
 }
 
-uv sync --extra dev
+uv sync --inexact --extra dev --extra minilm-windows
 if ($LASTEXITCODE -ne 0) { throw 'Python environment setup failed.' }
 npm ci
 if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency setup failed.' }

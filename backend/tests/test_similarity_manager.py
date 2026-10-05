@@ -1,5 +1,8 @@
 import hashlib
 import io
+import sys
+import types
+from pathlib import Path
 
 import pytest
 
@@ -67,6 +70,113 @@ def test_minilm_absent_uses_no_remote_or_implicit_model_fallback(tmp_path):
 
     assert manager.propose((block,), candidates) == []
     assert not (tmp_path / "models").exists()
+
+
+def test_minilm_runtime_selects_mlx_only_on_apple_silicon(monkeypatch):
+    monkeypatch.setattr(similarity_manager.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(similarity_manager.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(similarity_manager.importlib.util, "find_spec", lambda _: object())
+
+    status = similarity_manager._runtime_info()
+
+    assert status == {
+        "runtime": "mlx",
+        "runtimeAvailable": True,
+        "runtimeDevice": "CPU (MLX)",
+    }
+
+
+def test_minilm_runtime_selects_cpu_pytorch_on_windows(monkeypatch):
+    monkeypatch.setattr(similarity_manager.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(similarity_manager.importlib.util, "find_spec", lambda _: object())
+
+    status = similarity_manager._runtime_info()
+
+    assert status == {
+        "runtime": "pytorch",
+        "runtimeAvailable": True,
+        "runtimeDevice": "CPU",
+    }
+
+
+def test_minilm_torch_model_is_always_loaded_on_cpu(tmp_path, monkeypatch):
+    loaded_devices = []
+
+    class FakeModel:
+        def to(self, device):
+            loaded_devices.append(device)
+            return self
+
+        def eval(self):
+            return self
+
+    class NoCudaAccess:
+        def __getattr__(self, name):
+            raise AssertionError(f"CUDA must not be accessed: {name}")
+
+    torch = types.ModuleType("torch")
+    torch.cuda = NoCudaAccess()
+    torch_nn = types.ModuleType("torch.nn")
+    torch_functional = types.ModuleType("torch.nn.functional")
+    torch_nn.functional = torch_functional
+    transformers = types.ModuleType("transformers")
+    transformers.AutoTokenizer = types.SimpleNamespace(
+        from_pretrained=lambda *_args, **_kwargs: object()
+    )
+    transformers.AutoModel = types.SimpleNamespace(
+        from_pretrained=lambda *_args, **_kwargs: FakeModel()
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "torch.nn", torch_nn)
+    monkeypatch.setitem(sys.modules, "torch.nn.functional", torch_functional)
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+    manager = LocalSimilarityManager(tmp_path / "models")
+    manager._load_torch_model()
+
+    assert loaded_devices == ["cpu"]
+    assert manager._device == "cpu"
+
+
+def test_minilm_mlx_load_sets_cpu_device_and_converts_locally(tmp_path, monkeypatch):
+    selected_devices = []
+    loaded_paths = []
+    mlx_package = types.ModuleType("mlx")
+    mlx_core = types.ModuleType("mlx.core")
+    mlx_core.cpu = object()
+    mlx_core.set_default_device = selected_devices.append
+    mlx_package.core = mlx_core
+    mlx_embeddings = types.ModuleType("mlx_embeddings")
+    mlx_embeddings.__path__ = []
+
+    def load(path):
+        loaded_paths.append(Path(path))
+        return "model", "tokenizer"
+
+    mlx_embeddings.load = load
+    converter = types.ModuleType("mlx_embeddings.convert")
+
+    def convert(*, hf_path, mlx_path, dtype):
+        assert Path(hf_path) == manager.model_directory
+        assert dtype == "float32"
+        output = Path(mlx_path)
+        output.mkdir()
+        (output / "model.safetensors").write_bytes(b"converted locally")
+
+    converter.convert = convert
+    monkeypatch.setitem(sys.modules, "mlx", mlx_package)
+    monkeypatch.setitem(sys.modules, "mlx.core", mlx_core)
+    monkeypatch.setitem(sys.modules, "mlx_embeddings", mlx_embeddings)
+    monkeypatch.setitem(sys.modules, "mlx_embeddings.convert", converter)
+    manager = LocalSimilarityManager(tmp_path / "models")
+    manager.model_directory.parent.mkdir(parents=True)
+
+    manager._load_mlx_model()
+
+    assert selected_devices == [mlx_core.cpu]
+    assert manager._model == "model"
+    assert manager._tokenizer == "tokenizer"
+    assert loaded_paths[0].is_dir()
 
 
 def test_minilm_proposals_are_local_and_separate_from_group_confirmation(tmp_path, monkeypatch):

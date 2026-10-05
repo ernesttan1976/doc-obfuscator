@@ -13,17 +13,17 @@ Vite opens the preserved workspace at `http://localhost:5173/obfuscation-workspa
 
 ## Run the local API and project storage
 
-For a one-terminal development setup, install dependencies once and then start both services together:
+For a one-terminal development setup, install dependencies once and then start both services together. On Apple-Silicon macOS:
 
 ```bash
-uv sync --extra dev
+uv sync --inexact --extra dev --extra minilm-macos
 npm ci
 npm run dev:app
 ```
 
-The command starts the local API and Vite, then opens the app in your browser. Press Ctrl+C to stop the services it started. If the API is already running on port 8765, it reuses it and never kills unrelated processes. To run the services separately, start FastAPI with `uv run python -m backend.app` and Vite with `npm run dev` in another terminal. Vite proxies `/api` to the loopback-only API. It provides protected project/version/export/restoration/backup endpoints, explicit local-model status/download/cancel endpoints, native project/document/backup pickers, and an idle session lock.
+On Windows, replace `minilm-macos` with `minilm-windows`. The development launcher also syncs the platform runtime before starting Python, preserving already-installed optional packages. The command starts the local API and Vite, then opens the app in your browser. Press Ctrl+C to stop the services it started. If the API is already running on port 8765, it reuses it and never kills unrelated processes. To run the services separately, start FastAPI with `uv run --extra minilm-macos python -m backend.app` on Apple-Silicon macOS or `uv run --extra minilm-windows python -m backend.app` on Windows; start Vite with `npm run dev` in another terminal. Vite proxies `/api` to the loopback-only API. It provides protected project/version/export/restoration/backup endpoints, explicit local-model status/download/cancel endpoints, native project/document/backup pickers, and an idle session lock.
 
-To install the optional local model runtime, run `uv sync --extra models`. This installs Python packages only; NER and MiniLM weights/tokenizer assets remain absent until explicitly downloaded from their controls in the saved-document review panel.
+To install both optional Python model runtimes, use `uv sync --inexact --extra models --extra minilm-macos` on Apple-Silicon macOS or `uv sync --inexact --extra models --extra minilm-windows` on Windows. This installs Python packages only; NER and MiniLM weights/tokenizer assets remain absent until explicitly downloaded from their controls in the saved-document review panel.
 
 Use **Add or open workspace** in the sidebar to create or open a project. Previously opened workspaces are remembered in this browser and appear under **Recent workspaces** for one-click reopening. Select **Import file** to choose DOCX, PPTX, TXT, MD, CSV, or XLSX sources; each file is copied read-only into `.blot/originals/` and recorded as an original version in `.blot/project.sqlite3`. Files over 100 MB are rejected. Project graph/map state uses AES-GCM encryption with its random data key in the OS credential store.
 
@@ -60,17 +60,18 @@ The local project session locks after 15 minutes without user activity. Reopenin
 - **macOS:** run `setup-macos.command` once, then `launch-macos.command` to start Blot in a terminal and open the browser. Closing/stopping the launcher stops the service.
 - **Windows:** double-click `setup-windows.bat` once, then `launch-windows.bat`. The launcher opens the browser and stops the local Python service when the launcher exits. The `.ps1` scripts are also available for PowerShell.
 
-Both launchers bind the service to loopback. The setup scripts require `uv`, Node.js/npm, and internet access for pinned application dependencies. Model weights remain separate, opt-in downloads. Cross-platform clean-install and OS credential-prompt acceptance is still required before release.
+Both launchers bind the service to loopback. macOS setup installs the Apple-Silicon MLX runtime; Windows setup installs the PyTorch runtime. MiniLM inference is explicitly CPU-only on both platforms. Model weights remain separate, opt-in downloads. Cross-platform clean-install and OS credential-prompt acceptance is still required before release.
 
 Only adapter-supported editable text is covered. Coverage warnings are not proof that all sensitive content was found, and the app does not sanitize images/OCR, metadata, macros, embedded binaries, or unknown package surfaces.
 
-For production-like local serving, run `npm run build` and then `uv run python -m backend.app`. Visit `http://127.0.0.1:8765/obfuscation-workspace.html`.
+For production-like local serving on Apple-Silicon macOS, run `uv sync --inexact --extra minilm-macos`, then `npm run build` and `uv run --extra minilm-macos python -m backend.app`. On Windows, use `uv sync --inexact --extra minilm-windows` and `uv run --extra minilm-windows python -m backend.app`. Visit `http://127.0.0.1:8765/obfuscation-workspace.html`.
 
 ## Local checks
 
 ```bash
-uv run pytest
-uv run ruff check backend
+# Apple-Silicon macOS; on Windows use --extra minilm-windows instead
+uv run --extra minilm-macos pytest
+uv run --extra minilm-macos ruff check backend
 npm test
 npm run build
 npm audit --omit=dev
@@ -87,7 +88,7 @@ Stages 6–9 now include connected review/export/restoration workflows, encrypte
 
 ## Command to Start the App
 ```
-uv sync --extra dev
+uv sync --extra dev --extra minilm-macos
 npm ci
 npm run dev:app
 ```

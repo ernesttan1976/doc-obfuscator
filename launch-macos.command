@@ -8,6 +8,7 @@ if ! command -v uv >/dev/null 2>&1 || [[ ! -d .venv ]]; then
   exit 1
 fi
 
+uv sync --inexact --extra dev --extra minilm-macos
 "$ROOT/.venv/bin/python" -m backend.app &
 SERVER_PID=$!
 cleanup() {

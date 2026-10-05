@@ -5,6 +5,8 @@ import importlib.util
 import json
 import math
 import os
+import platform
+import shutil
 import threading
 import uuid
 from pathlib import Path
@@ -42,6 +44,31 @@ SIMILARITY_BATCH_SIZE = 32
 SIMILARITY_MAX_LENGTH = 128
 
 
+def _runtime_info() -> dict[str, str | bool]:
+    system = platform.system()
+    machine = platform.machine().lower()
+    if system == "Darwin":
+        apple_silicon = machine in {"arm64", "aarch64"}
+        available = apple_silicon and all(
+            importlib.util.find_spec(module) is not None
+            for module in ("mlx", "mlx_embeddings")
+        )
+        return {
+            "runtime": "mlx",
+            "runtimeAvailable": available,
+            "runtimeDevice": "CPU (MLX)",
+        }
+
+    available = all(
+        importlib.util.find_spec(module) is not None for module in ("torch", "transformers")
+    )
+    return {
+        "runtime": "pytorch",
+        "runtimeAvailable": available,
+        "runtimeDevice": "CPU",
+    }
+
+
 class LocalSimilarityManager:
     """Explicitly acquire and run a pinned MiniLM model on CPU only."""
 
@@ -61,6 +88,7 @@ class LocalSimilarityManager:
     def status(self) -> dict[str, object]:
         with self._lock:
             job = dict(self._job)
+        runtime = _runtime_info()
         return {
             **job,
             "modelId": SIMILARITY_MODEL_ID,
@@ -69,10 +97,7 @@ class LocalSimilarityManager:
             "license": SIMILARITY_MODEL_LICENSE,
             "sizeBytes": SIMILARITY_SIZE_BYTES,
             "installed": self._installed_manifest_is_valid(),
-            "runtimeAvailable": (
-                importlib.util.find_spec("transformers") is not None
-                and importlib.util.find_spec("torch") is not None
-            ),
+            **runtime,
         }
 
     def start_download(self, confirmed: bool) -> dict[str, object]:
@@ -205,8 +230,13 @@ class LocalSimilarityManager:
     def propose(self, blocks: tuple[CandidateBlock, ...], candidates: list[dict[str, object]]) -> list[dict[str, object]]:
         if not self._installed_manifest_is_valid():
             return []
-        if not self.status()["runtimeAvailable"]:
-            raise ModelManagerError("Install the optional local model runtime to use MiniLM.")
+        runtime = _runtime_info()
+        if not runtime["runtimeAvailable"]:
+            if runtime["runtime"] == "mlx":
+                message = "Install the macOS Apple-Silicon MiniLM runtime with `uv sync --extra minilm-macos`."
+            else:
+                message = "Install the Windows MiniLM runtime with `uv sync --extra minilm-windows`."
+            raise ModelManagerError(message)
         return propose_contextual_variants(
             candidates,
             blocks,
@@ -227,47 +257,139 @@ class LocalSimilarityManager:
     def embed_contexts(self, contexts: list[str]) -> list[list[float]]:
         if not contexts:
             return []
+        runtime = _runtime_info()
+        if not runtime["runtimeAvailable"]:
+            raise ModelManagerError("The platform-specific local MiniLM runtime is not installed.")
         if self._model is None:
             with self._model_lock:
                 if self._model is None:
                     try:
                         self._verify_installed_files()
-                        import torch
-                        from torch.nn import functional
-                        from transformers import AutoModel, AutoTokenizer
-
-                        self._tokenizer = AutoTokenizer.from_pretrained(
-                            str(self.model_directory), local_files_only=True, trust_remote_code=False
-                        )
-                        self._model = AutoModel.from_pretrained(
-                            str(self.model_directory),
-                            local_files_only=True,
-                            trust_remote_code=False,
-                            use_safetensors=True,
-                        ).to("cpu")
-                        self._model.eval()
-                        self._torch = torch
-                        self._functional = functional
+                        if runtime["runtime"] == "mlx":
+                            self._load_mlx_model()
+                        else:
+                            self._load_torch_model()
                     except Exception as exc:
-                        raise ModelManagerError("The local MiniLM model could not be loaded offline.") from exc
+                        if isinstance(exc, ModelManagerError):
+                            raise
+                        raise ModelManagerError(
+                            f"The local MiniLM model could not load with {runtime['runtime']}."
+                        ) from exc
 
         vectors: list[list[float]] = []
-        for offset in range(0, len(contexts), SIMILARITY_BATCH_SIZE):
-            batch = contexts[offset : offset + SIMILARITY_BATCH_SIZE]
-            encoded = self._tokenizer(
-                batch,
-                padding=True,
-                truncation=True,
-                max_length=SIMILARITY_MAX_LENGTH,
-                return_tensors="pt",
-            )
-            with self._torch.inference_mode():
-                output = self._model(**encoded)
-                mask = encoded["attention_mask"].unsqueeze(-1).to(output.last_hidden_state.dtype)
-                pooled = (output.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
-                normalized = self._functional.normalize(pooled, p=2, dim=1)
-            batch_vectors = normalized.tolist()
-            if any(not math.isfinite(value) for vector in batch_vectors for value in vector):
-                raise ModelManagerError("The local MiniLM model returned invalid embeddings.")
-            vectors.extend(batch_vectors)
+        try:
+            for offset in range(0, len(contexts), SIMILARITY_BATCH_SIZE):
+                batch = contexts[offset : offset + SIMILARITY_BATCH_SIZE]
+                if runtime["runtime"] == "mlx":
+                    encoded = self._tokenizer.batch_encode_plus(
+                        batch,
+                        padding=True,
+                        truncation=True,
+                        max_length=SIMILARITY_MAX_LENGTH,
+                        return_tensors="mlx",
+                    )
+                    output = self._model(**encoded)
+                    self._mx.eval(output.text_embeds)
+                    batch_vectors = output.text_embeds.tolist()
+                else:
+                    encoded = self._tokenizer(
+                        batch,
+                        padding=True,
+                        truncation=True,
+                        max_length=SIMILARITY_MAX_LENGTH,
+                        return_tensors="pt",
+                    )
+                    encoded = {key: value.to(self._device) for key, value in encoded.items()}
+                    with self._torch.inference_mode():
+                        output = self._model(**encoded)
+                        mask = encoded["attention_mask"].unsqueeze(-1).to(output.last_hidden_state.dtype)
+                        pooled = (output.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+                        normalized = self._functional.normalize(pooled, p=2, dim=1)
+                    batch_vectors = normalized.tolist()
+                if any(not math.isfinite(value) for vector in batch_vectors for value in vector):
+                    raise ModelManagerError("The local MiniLM model returned invalid embeddings.")
+                vectors.extend(batch_vectors)
+        except ModelManagerError:
+            raise
+        except Exception as exc:
+            raise ModelManagerError("Local MiniLM inference failed on the selected platform runtime.") from exc
         return vectors
+
+    def _load_mlx_model(self) -> None:
+        import mlx.core as mx
+
+        mx.set_default_device(mx.cpu)
+        mlx_directory = self.model_directory.with_name(f"{self.model_directory.name}-mlx")
+        mlx_manifest = mlx_directory / "blot-mlx-manifest.json"
+        if not self._mlx_cache_is_valid(mlx_manifest):
+            if mlx_directory.exists():
+                raise ModelManagerError(
+                    "The cached MLX MiniLM conversion is incomplete; remove its `-mlx` directory and retry."
+                )
+            temporary_directory = mlx_directory.with_name(f".{mlx_directory.name}.partial")
+            if temporary_directory.exists():
+                shutil.rmtree(temporary_directory)
+            try:
+                from mlx_embeddings.convert import convert
+
+                convert(
+                    hf_path=str(self.model_directory),
+                    mlx_path=str(temporary_directory),
+                    dtype="float32",
+                )
+                (temporary_directory / "blot-mlx-manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "modelId": SIMILARITY_MODEL_ID,
+                            "revision": SIMILARITY_MODEL_REVISION,
+                            "artifactSetSha256": SIMILARITY_ARTIFACT_SHA256,
+                        },
+                        separators=(",", ":"),
+                    ),
+                    encoding="utf-8",
+                )
+                if not (temporary_directory / "model.safetensors").is_file():
+                    raise ModelManagerError("MLX conversion did not produce model weights.")
+                os.replace(temporary_directory, mlx_directory)
+            except Exception as exc:
+                if isinstance(exc, ModelManagerError):
+                    raise
+                raise ModelManagerError(
+                    "The local MiniLM files could not be converted for MLX offline."
+                ) from exc
+
+        from mlx_embeddings import load
+
+        self._model, self._tokenizer = load(str(mlx_directory))
+        self._mx = mx
+
+    def _mlx_cache_is_valid(self, manifest_path: Path) -> bool:
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return (
+            manifest.get("modelId") == SIMILARITY_MODEL_ID
+            and manifest.get("revision") == SIMILARITY_MODEL_REVISION
+            and manifest.get("artifactSetSha256") == SIMILARITY_ARTIFACT_SHA256
+            and manifest_path.with_name("model.safetensors").is_file()
+        )
+
+    def _load_torch_model(self) -> None:
+        import torch
+        from torch.nn import functional
+        from transformers import AutoModel, AutoTokenizer
+
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            str(self.model_directory), local_files_only=True, trust_remote_code=False
+        )
+        self._device = "cpu"
+        self._model = AutoModel.from_pretrained(
+            str(self.model_directory),
+            local_files_only=True,
+            trust_remote_code=False,
+            use_safetensors=True,
+        ).to(self._device)
+        self._model.eval()
+        self._torch = torch
+        self._functional = functional
