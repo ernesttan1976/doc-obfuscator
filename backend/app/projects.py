@@ -37,6 +37,7 @@ from .model_manager import ModelManagerError
 from .ollaya_scoring import (
     LocalOllayaScorer,
     OllayaScoringError,
+    apply_common_word_filter,
     build_ollaya_scoring_input,
     should_auto_suggest,
     unavailable_score,
@@ -1054,6 +1055,8 @@ class ProjectService:
             ollaya_failures = len(candidates)
             for candidate in candidates:
                 candidate.update(unavailable_score())
+        for candidate in candidates:
+            apply_common_word_filter(candidate)
         old_ids = {node["id"] for node in existing_nodes}
         graph["nodes"] = [node for node in nodes if node.get("id") not in old_ids] + candidates
         graph["edges"] = [

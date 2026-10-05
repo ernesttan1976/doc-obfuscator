@@ -721,13 +721,13 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
     assert "No candidates are selected at this obfuscation level" in all_excluded.json()["detail"]
     assert preview["requiresAcknowledgement"] is True
     assert preview["preexistingPlaceholderCount"] == 1
-    assert len(preview["matches"]) == 2
-    assert {match["term"] for match in preview["matches"]} == {"Alex Tan", "Project Cedar"}
+    assert len(preview["matches"]) == 1
+    assert {match["term"] for match in preview["matches"]} == {"Alex Tan"}
     assert {match["term"] for match in partial_preview["matches"]} == {"Alex Tan"}
-    assert {match["term"] for match in broad_preview["matches"]} == {"Alex Tan", "Project Cedar"}
+    assert {match["term"] for match in broad_preview["matches"]} == {"Alex Tan"}
     assert all(match["term"] != "alex@example.test" for match in preview["matches"])
     generated_tokens = re.findall(r"\[\[T_[0-9a-f]{6}\]\]", preview["preview"]["text"])
-    assert len(generated_tokens) == 2
+    assert len(generated_tokens) == 1
     assert unacknowledged.status_code == 409
     assert exported.status_code == 200
     version = exported.json()

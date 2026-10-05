@@ -10,6 +10,7 @@ from backend.app.key_store import KeyStoreUnavailable
 from backend.app.ollaya_scoring import (
     LocalOllayaScorer,
     OllayaScoringError,
+    apply_common_word_filter,
     build_ollaya_scoring_input,
     confidence_to_priority,
     score_result_from_signals,
@@ -56,6 +57,9 @@ def test_signal_validation_confidence_and_automatic_suggestion_rules():
             "has_operational_significance": {
                 "type": "choice", "choice": "No", "probabilities": {"Yes": 0.23, "No": 0.77}
             },
+            "is_not_made_of_common_words": {
+                "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.99, "No": 0.01}
+            },
         },
     }
     signals = validate_ollaya_response(response)
@@ -63,11 +67,13 @@ def test_signal_validation_confidence_and_automatic_suggestion_rules():
     assert result["redactionConfidence"] == 0.83
     assert result["reviewPriority"] == 4
     assert result["scoreStatus"] == "complete"
+    assert result["notCommonWordsProbability"] == 0.99
     assert should_auto_suggest({**result, "level": 10, "decision": "suggested"}) is True
 
     no_result = score_result_from_signals({
         "isIdentifier": {"answer": "No", "probabilityYes": 0.2},
         "hasOperationalSignificance": {"answer": "No", "probabilityYes": 0.1},
+        "isNotMadeOfCommonWords": {"answer": "No", "probabilityYes": 0.4},
     })
     assert no_result["redactionConfidence"] is None
     assert no_result["reviewPriority"] is None
@@ -122,6 +128,9 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
                     "has_operational_significance": {
                         "type": "choice", "choice": "No", "probabilities": {"Yes": 0.3, "No": 0.7}
                     },
+                    "is_not_made_of_common_words": {
+                        "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.7, "No": 0.3}
+                    },
                 },
             }),
             stderr="",
@@ -134,7 +143,9 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
 
     assert captured["command"][:3] == ["/usr/local/bin/ollaya", "run", "von:1.1"]
     questions_arg = captured["command"][captured["command"].index("--questions") + 1]
-    assert set(json.loads(questions_arg)) == {"is_identifier", "has_operational_significance"}
+    assert set(json.loads(questions_arg)) == {
+        "is_identifier", "has_operational_significance", "is_not_made_of_common_words"
+    }
     assert "Private Project" not in " ".join(captured["command"])
     assert json.loads(captured["input"]) == {
         "candidate": "Private Project",
@@ -146,7 +157,7 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
     assert len(records) == 1
     assert records[0].ollaya_model == "von:1.1"
     assert records[0].ollaya_outcome == "complete"
-    assert records[0].ollaya_signal_count == 2
+    assert records[0].ollaya_signal_count == 3
     log_line = records[0].getMessage()
     log_entry = json.loads(log_line)
     assert "\n" not in log_line
@@ -175,6 +186,9 @@ def test_local_cli_caches_successful_scores_for_identical_inputs(caplog):
                         "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.8, "No": 0.2}
                     },
                     "has_operational_significance": {
+                        "type": "choice", "choice": "No", "probabilities": {"Yes": 0.2, "No": 0.8}
+                    },
+                    "is_not_made_of_common_words": {
                         "type": "choice", "choice": "No", "probabilities": {"Yes": 0.2, "No": 0.8}
                     },
                 },
@@ -241,6 +255,7 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
             return score_result_from_signals({
                 "isIdentifier": {"answer": "No", "probabilityYes": 0.1},
                 "hasOperationalSignificance": {"answer": "No", "probabilityYes": 0.2},
+                "isNotMadeOfCommonWords": {"answer": "Yes", "probabilityYes": 0.8},
             })
 
     project_dir = tmp_path / "workspace"
@@ -260,9 +275,48 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
     assert analysis["ollayaStatus"] == "ready"
     assert by_term["Alex Tan"]["decision"] == "included"
     assert by_term["Alex Tan"]["pinned"] is True
+    assert by_term["Jordan Lee"]["decision"] == "excluded"
+    assert by_term["Jordan Lee"]["notCommonWordsProbability"] == 0.8
     assert by_term["Jordan Lee"]["scoreStatus"] == "complete"
     assert by_term["Jordan Lee"]["redactionConfidence"] is None
     assert [match["term"] for match in preview["matches"]] == ["Alex Tan"]
     encrypted_state = (project_dir / ".blot" / "private-state.enc").read_bytes()
     assert b"Alex Tan met Jordan Lee on Monday" not in encrypted_state
     assert b'"context"' not in encrypted_state
+
+
+def test_common_word_filter_excludes_above_half_and_fails_closed_but_preserves_pinned_and_structured_terms():
+    above_threshold = {
+        "category": "CAPITALIZED_PHRASE",
+        "notCommonWordsProbability": 0.5001,
+        "decision": "suggested",
+    }
+    apply_common_word_filter(above_threshold)
+    assert above_threshold["decision"] == "excluded"
+    assert above_threshold["commonWordFilterStatus"] == "excluded"
+
+    at_threshold = {
+        "category": "NER_ENTITY",
+        "notCommonWordsProbability": 0.5,
+        "decision": "suggested",
+    }
+    apply_common_word_filter(at_threshold)
+    assert at_threshold["decision"] == "suggested"
+
+    unavailable = {"category": "CAPITALIZED_PHRASE", "decision": "suggested"}
+    apply_common_word_filter(unavailable)
+    assert unavailable["decision"] == "excluded"
+    assert unavailable["commonWordFilterStatus"] == "unavailable"
+
+    pinned = {
+        "category": "CAPITALIZED_PHRASE",
+        "notCommonWordsProbability": 0.9,
+        "decision": "included",
+        "pinned": True,
+    }
+    apply_common_word_filter(pinned)
+    assert pinned["decision"] == "included"
+
+    email = {"category": "EMAIL", "notCommonWordsProbability": 0.9, "decision": "suggested"}
+    apply_common_word_filter(email)
+    assert email["decision"] == "suggested"

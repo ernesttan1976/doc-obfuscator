@@ -16,12 +16,13 @@ from typing import Any
 
 from .candidate_engine import CandidateBlock
 
-SCORING_METHOD = "ollaya_yes_no_v3"
+SCORING_METHOD = "ollaya_yes_no_v4"
 SCORING_MODEL = "von:1.1"
 MAX_CONTEXT_CHARS = 192
 MAX_CONTEXT_WINDOW_CHARS = 192
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_SCORE_CACHE_ENTRIES = 2048
+NON_COMMON_WORD_EXCLUDE_THRESHOLD = 0.5
 
 _QUESTIONS = {
     "is_identifier": {
@@ -40,10 +41,23 @@ _QUESTIONS = {
             "No": "It does not identify an operational concept.",
         },
     },
+    "is_not_made_of_common_words": {
+        "type": "choice",
+        "instructions": "Is this candidate term NOT made entirely of common English words? Ignore capitalization alone. Judge the term itself, not whether it is a valid entity.",
+        "criteria": {
+            "Yes": "At least one substantive token is uncommon, invented, malformed, or not a common English word.",
+            "No": "Every substantive token is a common English word.",
+        },
+    },
 }
 
 _SENTENCE_BOUNDARY = re.compile(r"[.!?;\n]")
 _SIGNAL_NAMES = {
+    "is_identifier": "isIdentifier",
+    "has_operational_significance": "hasOperationalSignificance",
+    "is_not_made_of_common_words": "isNotMadeOfCommonWords",
+}
+_REDACTION_SIGNAL_NAMES = {
     "is_identifier": "isIdentifier",
     "has_operational_significance": "hasOperationalSignificance",
 }
@@ -168,19 +182,23 @@ def validate_ollaya_response(response: Any) -> dict[str, dict[str, str | float]]
 def score_result_from_signals(signals: dict[str, dict[str, str | float]]) -> dict[str, Any]:
     affirmative_sources = [
         source_name
-        for source_name, public_name in _SIGNAL_NAMES.items()
+        for source_name, public_name in _REDACTION_SIGNAL_NAMES.items()
         if signals.get(public_name, {}).get("answer") == "Yes"
     ]
-    confidence = calculate_redaction_confidence(signals.values())
+    confidence = calculate_redaction_confidence(
+        signals.get(public_name, {}) for public_name in _REDACTION_SIGNAL_NAMES.values()
+    )
     priority = confidence_to_priority(confidence)
     valid_signal_count = len(signals)
     reasons = [_SIGNAL_REASONS[name] for name in affirmative_sources]
+    uncommon_words_signal = signals.get("isNotMadeOfCommonWords", {})
     return {
         "redactionConfidence": confidence,
         "reviewPriority": priority,
         "scoringMethod": SCORING_METHOD,
         "scoringModel": SCORING_MODEL,
         "signals": signals,
+        "notCommonWordsProbability": uncommon_words_signal.get("probabilityYes"),
         "reasons": reasons,
         "scoreStatus": "complete" if valid_signal_count == len(_SIGNAL_NAMES) else "partial" if valid_signal_count else "unavailable",
     }
@@ -354,9 +372,29 @@ def unavailable_score() -> dict[str, Any]:
         "scoringMethod": SCORING_METHOD,
         "scoringModel": None,
         "signals": {},
+        "notCommonWordsProbability": None,
         "reasons": [],
         "scoreStatus": "unavailable",
     }
+
+
+def apply_common_word_filter(candidate: dict[str, Any]) -> None:
+    """Exclude unpinned word-phrase candidates unless Ollaya finds common words."""
+    if candidate.get("category") not in {"CAPITALIZED_PHRASE", "NER_ENTITY"}:
+        return
+    if candidate.get("pinned"):
+        return
+
+    probability = candidate.get("notCommonWordsProbability")
+    valid_probability = _valid_probability(probability)
+    should_exclude = (
+        not valid_probability
+        or probability > NON_COMMON_WORD_EXCLUDE_THRESHOLD
+    )
+    candidate["commonWordFilterStatus"] = (
+        "unavailable" if not valid_probability else "excluded" if should_exclude else "passed"
+    )
+    candidate["decision"] = "excluded" if should_exclude else "suggested"
 
 
 def should_auto_suggest(candidate: dict[str, Any]) -> bool:
