@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import logging
 import os
 import secrets
 import time
@@ -602,6 +603,8 @@ app = create_app()
 
 def run() -> None:
     port = int(os.environ.get("BLOT_PORT", "8765"))
+    # Make privacy-safe model-call metadata visible alongside Uvicorn logs.
+    logging.basicConfig(level=logging.INFO)
     uvicorn.run(
         "backend.app.main:app",
         host="127.0.0.1",

@@ -1,4 +1,5 @@
 import json
+import logging
 import secrets
 import subprocess
 
@@ -109,7 +110,7 @@ def test_contradictory_or_missing_signal_is_unavailable_not_a_no():
     assert score_result_from_signals(partial)["scoreStatus"] == "partial"
 
 
-def test_local_cli_receives_candidate_payload_on_stdin_not_in_command_arguments():
+def test_local_cli_receives_candidate_payload_on_stdin_and_logs_only_safe_call_metadata(caplog):
     captured = {}
 
     def fake_run(command, **kwargs):
@@ -134,27 +135,44 @@ def test_local_cli_receives_candidate_payload_on_stdin_not_in_command_arguments(
             stderr="",
         )
 
-    result = LocalOllayaScorer(executable="/usr/local/bin/ollaya", run=fake_run).score_candidate(
-        {"candidate": "Private Project"}
-    )
+    with caplog.at_level(logging.INFO, logger="backend.app.ollaya_scoring"):
+        result = LocalOllayaScorer(executable="/usr/local/bin/ollaya", run=fake_run).score_candidate(
+            {"candidate": "Private Project", "contextSnippets": ["Private context phrase"]}
+        )
 
     assert captured["command"][:3] == ["/usr/local/bin/ollaya", "run", "von:1.1"]
     assert "Private Project" not in " ".join(captured["command"])
-    assert json.loads(captured["input"]) == {"candidate": "Private Project"}
+    assert json.loads(captured["input"]) == {
+        "candidate": "Private Project",
+        "contextSnippets": ["Private context phrase"],
+    }
     assert result["redactionConfidence"] == 0.7
     assert captured["timeout"] == 60
+    records = [record for record in caplog.records if getattr(record, "ollaya_event", None) == "candidate_scoring_call"]
+    assert len(records) == 1
+    assert records[0].ollaya_model == "von:1.1"
+    assert records[0].ollaya_outcome == "complete"
+    assert records[0].ollaya_signal_count == 2
+    assert "Private Project" not in caplog.text
+    assert "Private context phrase" not in caplog.text
 
 
-def test_local_cli_does_not_attempt_to_download_a_missing_model():
+def test_local_cli_does_not_attempt_to_download_a_missing_model_and_logs_unavailable(caplog):
     calls = []
 
     def fake_run(command, **kwargs):
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, stdout="NAME ID SIZE MODIFIED\nlaya:en id 1GB now\n", stderr="")
 
-    with pytest.raises(OllayaScoringError, match="model is not installed"):
+    with (
+        caplog.at_level(logging.WARNING, logger="backend.app.ollaya_scoring"),
+        pytest.raises(OllayaScoringError, match="model is not installed"),
+    ):
         LocalOllayaScorer(executable="/local/ollaya", run=fake_run).score_candidate({"candidate": "test"})
     assert calls == [["/local/ollaya", "list"]]
+    records = [record for record in caplog.records if getattr(record, "ollaya_event", None) == "candidate_scoring_call"]
+    assert len(records) == 1
+    assert records[0].ollaya_outcome == "unavailable"
 
 
 class MemoryKeyStore:

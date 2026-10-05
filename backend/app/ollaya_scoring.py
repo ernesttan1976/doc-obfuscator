@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import shutil
 import subprocess
+import time
 from bisect import bisect_left
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
@@ -52,6 +54,7 @@ _SIGNAL_REASONS = {
     "is_identifier": "Identifies a named entity in context",
     "has_operational_significance": "Has operational significance in context",
 }
+_LOGGER = logging.getLogger(__name__)
 
 
 class OllayaScoringError(Exception):
@@ -280,6 +283,29 @@ class LocalOllayaScorer:
         }
 
     def score_candidate(self, features: dict[str, Any]) -> dict[str, Any]:
+        started = time.perf_counter()
+        outcome = "unavailable"
+        signal_count = 0
+        try:
+            result = self._score_candidate(features)
+            outcome = str(result.get("scoreStatus", "unavailable"))
+            signals = result.get("signals")
+            signal_count = len(signals) if isinstance(signals, dict) else 0
+            return result
+        finally:
+            _LOGGER.log(
+                logging.WARNING if outcome == "unavailable" else logging.INFO,
+                "Ollaya candidate scoring call finished",
+                extra={
+                    "ollaya_event": "candidate_scoring_call",
+                    "ollaya_model": self.model,
+                    "ollaya_outcome": outcome,
+                    "ollaya_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "ollaya_signal_count": signal_count,
+                },
+            )
+
+    def _score_candidate(self, features: dict[str, Any]) -> dict[str, Any]:
         executable = self.executable or shutil.which("ollaya")
         if not executable:
             raise OllayaScoringError("The local Ollaya CLI is not installed or is not on PATH.")
