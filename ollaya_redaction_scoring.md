@@ -13,7 +13,7 @@ Blot estimates whether the user is likely to want a term obfuscated **in this do
 ## Current Blot baseline
 
 - Candidate discovery is local: deterministic patterns and capitalized phrases, optional local GLiNER entity suggestions, and manual phrase selection.
-- RapidFuzz and optional local MiniLM produce unconfirmed similarity proposals. Similarity alone never creates a confirmed replacement group.
+- Candidate discovery does not search for similar terms. Users create groups explicitly.
 - Candidate decisions and the graph are encrypted and scoped to a document version. Manual Include/Exclude decisions are pinned.
 - The UI's current 1–10 candidate levels are heuristic defaults (email/phone/manual: 1; dates/identifiers: 2; capitalized phrases: 5). They are not calibrated probabilities.
 - Ollaya scoring is implemented as a new local decision layer; it does not replace extraction or change graph membership.
@@ -40,7 +40,7 @@ User review and correction
 Encrypted, document-scoped user decisions
 ```
 
-Candidate extraction and similarity grouping remain separate from this scoring step. The score ranks whether to suggest obfuscation; it does not assert that two terms are interchangeable and does not authorize group-wide replacement.
+Candidate extraction and user-defined grouping remain separate from this scoring step. The score ranks whether to suggest obfuscation; it does not assert that two terms are interchangeable and does not authorize group-wide replacement.
 
 ## Ollaya signal questions
 
@@ -51,7 +51,7 @@ Ask narrow, candidate-specific questions using only the minimum term/context nee
 | `is_identifier` | Does the term identify a person, organization, project, unit, location, system, codeword, or other named entity in this context? | Redaction-positive |
 | `has_operational_significance` | Does the term name or distinguish an operational activity, capability, vulnerability, plan, or resource in this context? | Redaction-positive |
 
-Do not ask Ollaya to label a term “confidential.” The semantic signals are exactly these two; frequency, capitalization, extraction labels, and nearby entities are supporting input facts, not additional signals in the score.
+Do not ask Ollaya to label a term “confidential.” The semantic signals are exactly these two; the only request state is the candidate term and at most one short context snippet.
 
 Represent each question using Ollaya's returned `p_i = P(Yes)` value. Treat it as a model-reported probability estimate, not as calibrated confidence until validated. A missing answer, service error, or malformed response is **unknown**, not an implicit No. Use the returned Yes probabilities in scoring.
 
@@ -65,33 +65,23 @@ Proposed interface:
 def build_ollaya_scoring_input(
     candidate: Candidate,
     text_blocks: Sequence[TextBlock],
-    candidates: Sequence[Candidate],
     *,
-    max_context_chars: int = 512,
+    max_context_chars: int = 192,
 ) -> OllayaScoringInput:
     ...
 ```
 
 Responsibilities:
 
-1. Locate the candidate's occurrences in supported text blocks and gather a small, sentence-clipped context window for each occurrence (deduplicate repeated contexts and cap the total payload).
-2. Include the candidate term and compact deterministic facts Blot already knows: occurrence count, candidate source (pattern/NER/manual), any available NER label, capitalization/shape, and types of nearby extracted candidates. Do not compute or inject extra sensitivity labels.
-3. Omit unsupported/empty fields rather than turning them into negative answers. Never include the full document, unrelated text blocks, embeddings, user history, or the encrypted graph/map.
-4. Return a typed payload with a schema version so the prompt and inference behavior can be tested and versioned. Context is transient and must not be logged or persisted.
+1. Select one valid candidate occurrence in supported text and take a sentence-clipped context window of at most 192 characters.
+2. Send only the candidate term and that one context string. Do not send frequency, source labels, nearby entities, embeddings, user history, or the encrypted graph/map.
+3. Omit context when no valid occurrence context exists; never send the full document or unrelated text blocks.
+4. Keep context transient; the request log is local and context is not persisted in the encrypted project graph.
 
 Example payload:
 
 ```json
-{
-  "schemaVersion": "blot_ollaya_input_v1",
-  "candidate": "Project Falcon",
-  "occurrenceCount": 2,
-  "extractionSources": ["capitalized_phrase", "ner"],
-  "entityLabels": ["project"],
-  "surfaceFacts": {"capitalized": true, "tokenCount": 2},
-  "nearbyEntityTypes": ["date", "location"],
-  "contextSnippets": ["... briefing for Project Falcon begins ..."]
-}
+{"candidate":"Project Falcon","context":"... briefing for Project Falcon begins ..."}
 ```
 
 The Ollaya adapter consumes this payload and asks the two questions from the table. Keep the input builder, Ollaya adapter, and final score function separate so each can be unit-tested independently.
@@ -137,14 +127,14 @@ Otherwise      → suggest only if at least one Ollaya answer is Yes;
                   order by Review Priority (10 first)
 ```
 
-Scores, priorities, and suggestions must never confirm similarity edges or expand a replacement group. Explicit Include/Exclude decisions remain pinned across re-analysis and slider changes.
+Scores and priorities must never create a user-defined group or change its membership. Explicit Include/Exclude decisions remain pinned across re-analysis and slider changes.
 
 ## User decisions and feedback
 
 - A user's Include/Exclude action is authoritative for that candidate in its current document/version and overrides the score and slider.
 - Persist decisions in the existing encrypted project graph. They remain scoped to a document version unless a separate explicit cross-document feature is designed later.
 - Use explicit user decisions for evaluation/calibration only; do not add learned user-pattern signals to the score in this plan.
-- Do not treat no action as rejection or approval. Similarity groups still require explicit confirmation.
+- Do not treat no action as rejection or approval. Users create groups explicitly.
 - Manual Include/Exclude decisions remain pinned across re-analysis and slider changes.
 
 ## Local integration and privacy
@@ -152,10 +142,10 @@ Scores, priorities, and suggestions must never confirm similarity edges or expan
 1. Add an Ollaya adapter behind a small backend interface such as `score_candidate(features)`. Keep Ollaya transport/model-specific code out of candidate extraction, graph persistence, and UI logic.
 2. Before committing to an endpoint, verify Ollaya's supported local invocation/API, model identifiers, response schema, installation/runtime requirements, model licensing, and resource use. Agent-host MCP tools are not themselves a product runtime dependency; Blot must invoke a locally available Ollaya runtime through a supported local interface.
 3. Keep inference local and offline after any explicit model acquisition. Do not send document text, terms, contexts, embeddings, feedback, or graph data to a hosted Ollaya endpoint. Bind any service communication to loopback and apply the existing local-app request protections.
-4. Pass the bounded candidate payload to the local Ollaya adapter. If several snippets are included, ask Ollaya to judge the candidate across those snippets and return one probability per question; do not add any other score signals.
+4. Pass the compact candidate/context payload to the local Ollaya adapter and return one probability per question; do not add any other score signals.
 5. Log each attempted candidate call as one compact JSON line containing the bounded request (questions and candidate state) and Ollaya response, plus model, outcome, duration, and valid-signal count. These local logs therefore include candidate terms/context and model answers. Do not send logs to a hosted endpoint. Persist only what is required for reproducibility (confidence, priority, scoring version, signal answers/probabilities, and decision evidence) inside the encrypted graph; context is not persisted there.
 6. If the Ollaya runtime/model is absent, unavailable, or fails, continue with deterministic baseline scores/tiers and display a non-blocking status. Never block import, preview, or export on inference availability. Do not represent fallback scores as Ollaya scores.
-7. Model downloads, if required, must be explicit, pinned, integrity checked, cancellable, and disclosed, following the existing optional GLiNER/MiniLM acquisition pattern. Do not add an automatic network dependency.
+7. Model downloads, if required, must be explicit, pinned, integrity checked, cancellable, and disclosed, following the existing optional GLiNER acquisition pattern. Do not add an automatic network dependency.
 
 ## Candidate result contract
 
@@ -214,7 +204,7 @@ The local model ID is pinned to `von:1.1`. The adapter validates probability ran
 - Extend encrypted candidate records with confidence, priority, score version, signal answers/probabilities, and model status; avoid persisting context text.
 - Order candidate review by priority and ensure pinned user decisions override automatic suggestions in both frontend and backend/export preview calculations.
 - Add reasons/signal inspection and model-availability status to candidate review.
-- Keep similarity proposals unconfirmed and unrelated to scores.
+- Keep user-defined group membership separate from Ollaya scores.
 
 ### Phase 4 — Evaluation and calibration
 
@@ -240,7 +230,7 @@ The local model ID is pinned to `von:1.1`. The adapter validates probability ran
 - Assert there is no non-loopback Ollaya request and no external transmission of candidate text or context.
 - Assert each Ollaya request/response is logged on one line and encrypted graph state contains no plaintext term/context when inspected at rest.
 - Assert scoring results remain version-scoped and never alter occurrences, groups, or placeholder maps.
-- Verify behavior with Ollaya installed and unavailable, with optional NER/MiniLM present or absent.
+- Verify behavior with Ollaya installed and unavailable, with optional NER present or absent.
 
 ### Product acceptance
 

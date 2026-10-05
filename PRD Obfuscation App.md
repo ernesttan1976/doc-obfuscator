@@ -6,7 +6,7 @@ Version 1.1 · 4 October 2026
 
 ## 1. Product purpose
 
-Build a local folder app that helps a user replace sensitive text in documents before sending them to an external LLM, then restore those terms in an Office document returned by the agent. The user decides what is sensitive in the context of each document. The app suggests similar terms, groups them in a document-specific graph, and previews proposed replacements through a 1–10 slider and direct click-to-include or click-to-exclude actions.
+Build a local folder app that helps a user replace sensitive text in documents before sending them to an external LLM, then restore those terms in an Office document returned by the agent. The user decides what is sensitive in the context of each document. The app discovers candidate terms, lets users create document-specific groups manually, and previews proposed replacements through a 1–10 slider and direct click-to-include or click-to-exclude actions.
 
 The first release supports text replacement in Word `.docx`, PowerPoint `.pptx`, and plain-text files such as `.txt`, `.md`, and `.csv`. It focuses on text. It does not aim to inspect, sanitise, or explain every internal Office feature. Restoration is offered only for agent-returned Office documents. A returned plain-text response remains obfuscated.
 
@@ -47,7 +47,7 @@ The replacement map and graph are never included in the file sent to the agent.
 The slider controls how broadly the app proposes terms for obfuscation in the current document. It is a review aid, not an official sensitivity rating or a guarantee. A suggested starting point is level 5. Profiles can assign candidate groups to levels, but the user can change any decision for the current document.
 
 - Level 1 shows a narrow set of high-confidence matches and terms the user has explicitly prioritised.
-- Higher levels add more candidate groups, including less certain similar terms and context-linked terms.
+- Higher levels add candidates with lower heuristic priorities.
 - Level 10 shows all candidates the app can identify under the current profile. It cannot show terms detection did not find.
 - Moving the slider updates the preview and match counts. A higher level does not undo a user's manual Exclude decision.
 - Manual Include and Exclude decisions stay pinned as the slider moves. Resetting them requires an explicit, undoable action.
@@ -55,15 +55,15 @@ The slider controls how broadly the app proposes terms for obfuscation in the cu
 
 The preview displays the page or slide text with proposed replacements highlighted. A text view supports dense content. Users can navigate through all pages or slides and see counts, graph groups, unresolved coverage and what changed at the selected slider value. Show labels as well as colour to distinguish automatic suggestions from manual choices.
 
-Exact slider tiers and similarity thresholds are configurable profile choices to validate with users. The levels must not imply that the same kind of term is always sensitive. A date may be included in one document and excluded in another.
+Exact slider tiers are configurable profile choices to validate with users. The levels must not imply that the same kind of term is always sensitive. A date may be included in one document and excluded in another.
 
-## 5. Click-to-edit and similar-term graph
+## 5. Click-to-edit and user-defined groups
 
 Clicking a word or selected phrase opens **Include in obfuscation** and **Exclude from obfuscation**. The app applies the decision throughout the current document to matching terms in that word's group, then refreshes the preview. Show how many occurrences will change and provide Undo.
 
-Similarity detection proposes groups from spelling variants, abbreviations, aliases and contextual similarity. The app must show why terms were grouped and let the user accept, split, merge or remove group members. It must not silently treat a broad semantic association as proof that two different terms are interchangeable. A manual Exclude in one group member cannot be overridden by an automatic suggestion.
+The app does not search for similar terms or suggest groups. Users may select candidates and explicitly create groups, then split, merge or remove group members. Group membership is always user-defined; a manual Exclude in one group member cannot be overridden by another member's decision.
 
-Each document version has an associated local graph object. The graph records term nodes, similar-term and alias edges, confidence, occurrences, the user's include/exclude decision, slider tier and the placeholder mapping needed for restoration. The graph is encrypted and stored beside the document in the private project workspace. It is not embedded in or exported with the obfuscated Office or text file.
+Each document version has an associated local graph object. The graph records term nodes, user-defined group membership, confidence, occurrences, the user's include/exclude decision, slider tier and the placeholder mapping needed for restoration. The graph is encrypted and stored beside the document in the private project workspace. It is not embedded in or exported with the obfuscated Office or text file.
 
 Illustrative graph shape:
 
@@ -78,9 +78,9 @@ Document version
 
 Graph decisions are scoped to a document by default. The user may apply a confirmed group across selected files in one project. Each document retains its own occurrences and decisions. A new project starts with a separate graph and token namespace unless the user deliberately reuses a profile or dictionary.
 
-### Similarity approach
+### Manual grouping
 
-Use RapidFuzz for spelling and formatting variants. Use the local encoder `sentence-transformers/all-MiniLM-L6-v2` to suggest contextually similar terms by comparing each term with its surrounding text. Store similarity scores as proposed graph edges; users must confirm a group before its members are obfuscated together. Term similarity can link related but distinct entities, so scores never trigger replacement on their own.
+Users select two or more candidates to create a group. Include/Exclude decisions and obfuscation can then apply to all group members; candidate discovery never assumes that similar-looking terms refer to the same entity.
 
 ## 6. Text file behaviour
 
@@ -115,7 +115,7 @@ Only the user-approved obfuscated file leaves the workspace when the user export
 | FR01 | Local project folder, import, versions and processing status. | Must |
 | FR02 | Text extraction and replacement in `.docx` and `.pptx`. | Must |
 | FR03 | Plain-text support for `.txt`, `.md`, `.csv` and documented additional text extensions. | Must |
-| FR04 | Per-document similarity graph with visible groups, confidence and source occurrences, suggested by RapidFuzz and local MiniLM embeddings. | Must |
+| FR04 | Per-document candidate graph with visible user-defined groups, confidence and source occurrences. | Must |
 | FR05 | 1–10 slider with live highlighted preview and match counts. | Must |
 | FR06 | Click-to-include/exclude with group propagation, manual overrides, split/merge and Undo. | Must |
 | FR07 | Opaque placeholders, private local mapping and exact restoration in returned `.docx` or `.pptx`. | Must |
@@ -127,8 +127,8 @@ Acceptance tests use synthetic documents with known terms and do not require sen
 
 - Moving the slider changes candidate highlights predictably and does not override pinned manual decisions.
 - Clicking Include or Exclude updates all confirmed group occurrences in scope; unrelated similarly named terms remain unchanged.
-- Users can review, split and merge proposed groups before export.
-- Similarity suggestions appear as unconfirmed graph edges; no group is obfuscated together until the user confirms it.
+- Users can select candidates to create groups, then split and merge those groups before export.
+- No candidate group is created automatically.
 - Word and PowerPoint text is replaced and restored while retaining surrounding content and formatting in the supported test set.
 - Markdown and CSV replacements preserve line structure, fields, quoting and delimiters in the supported test set.
 - A returned `.docx` or `.pptx` restores only intact placeholders from the selected document graph. Changed or foreign tokens remain unresolved.
@@ -138,18 +138,17 @@ Acceptance tests use synthetic documents with known terms and do not require sen
 
 ## 10. Delivery and decisions to resolve
 
-Prototype the graph review, slider and click behaviour with synthetic text first. Then implement the `.docx` and `.pptx` text round-trip and the plain-text formats. Pilot with non-sensitive documents and revise similarity groups and slider tiers from user feedback.
+Prototype the graph review, manual grouping, slider and click behaviour with synthetic text first. Then implement the `.docx` and `.pptx` text round-trip and the plain-text formats. Pilot with non-sensitive documents and revise grouping workflows and slider tiers from user feedback.
 
 Resolve these choices before implementation:
 
 1. Which operating system should the first release target?
 2. Is `.xlsx` text-cell replacement needed, or is `.csv` sufficient for spreadsheet workflows?
-3. Should term similarity be detected only with local algorithms, or may users enable a local language model?
-4. Should a confirmed term group apply across every project file by default, or only to files the user selects?
-5. Which plain-text extensions and encodings should ship in the first release?
-6. What file sizes and preview response times should the first release target?
-7. What lock timeout and encrypted backup method should protect the local graph and mapping?
-8. Which external LLM services are permitted for the intended documents?
+3. Should a confirmed term group apply across every project file by default, or only to files the user selects?
+4. Which plain-text extensions and encodings should ship in the first release?
+5. What file sizes and preview response times should the first release target?
+6. What lock timeout and encrypted backup method should protect the local graph and mapping?
+7. Which external LLM services are permitted for the intended documents?
 
 ## Reference
 

@@ -6,7 +6,7 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue) -or -not (Test-Path '.ve
   throw 'Run setup-windows.ps1 first.'
 }
 
-uv sync --inexact --extra dev --extra minilm-windows
+uv sync --inexact --extra dev
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 $Server = Start-Process -FilePath $Python -ArgumentList @('-m', 'backend.app') -WorkingDirectory $Root -PassThru -NoNewWindow
 try {

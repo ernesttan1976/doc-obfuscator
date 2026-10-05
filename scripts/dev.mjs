@@ -9,11 +9,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const python = path.join(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
 const vite = path.join(root, 'node_modules/vite/bin/vite.js');
 const healthUrl = 'http://127.0.0.1:8765/api/health';
-const minilmExtra = process.platform === 'darwin'
-  ? 'minilm-macos'
-  : process.platform === 'win32'
-    ? 'minilm-windows'
-    : null;
 const children = [];
 let stopping = false;
 
@@ -53,9 +48,7 @@ const stopChildren = () => {
 };
 
 const syncPythonDependencies = () => new Promise((resolve, reject) => {
-  const args = ['sync', '--inexact', '--extra', 'dev'];
-  if (minilmExtra) args.push('--extra', minilmExtra);
-  const sync = spawn('uv', args, { cwd: root, stdio: 'inherit' });
+  const sync = spawn('uv', ['sync', '--inexact', '--extra', 'dev'], { cwd: root, stdio: 'inherit' });
   sync.once('error', reject);
   sync.once('exit', (code) => {
     if (code === 0) resolve();

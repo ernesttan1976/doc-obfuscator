@@ -1,6 +1,8 @@
 # Blot — Local Document Obfuscation
 
-This repository contains the OpenDesign React prototype and the approved implementation roadmap in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md). The product target is a local-only browser app backed by FastAPI. Stages 2–4 add encrypted project state, immutable source intake, and local document previews for TXT, MD, CSV, XLSX, DOCX, and PPTX. Stage 5 provides deterministic pattern candidates, manual phrase candidates, encrypted per-version graph storage, unconfirmed RapidFuzz proposals, an optional pinned GLiNER NER model, and an optional pinned MiniLM contextual encoder. Both model artifact sets download only after explicit user confirmation.
+This repository contains the OpenDesign React prototype and the approved implementation roadmap in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md). The product target is a local-only browser app backed by FastAPI. Stages 2–4 add encrypted project state, immutable source intake, and local document previews for TXT, MD, CSV, XLSX, DOCX, and PPTX. Stage 5 provides deterministic pattern candidates, manual phrase candidates, encrypted per-version graph storage, explicit user-defined groups, and an optional pinned GLiNER NER model. The NER artifact downloads only after explicit user confirmation.
+
+Automatic searches and proposals for similar-term groups have been removed. Users select candidates and create groups manually; historical MiniLM/RapidFuzz references below are superseded by this behavior.
 
 ## Run the current UI prototype
 
@@ -16,16 +18,16 @@ Vite opens the preserved workspace at `http://localhost:5173/obfuscation-workspa
 For a one-terminal development setup, install dependencies once and then start both services together. On Apple-Silicon macOS:
 
 ```bash
-uv sync --inexact --extra dev --extra minilm-macos
+uv sync --inexact --extra dev
 npm ci
 npm run dev:app
 ```
 
-On Windows, replace `minilm-macos` with `minilm-windows`. The development launcher also syncs the platform runtime before starting Python, preserving already-installed optional packages. The command starts the local API and Vite, then opens the app in your browser. Press Ctrl+C to stop the services it started. If the API is already running on port 8765, it reuses it and never kills unrelated processes. To run the services separately, start FastAPI with `uv run --extra minilm-macos python -m backend.app` on Apple-Silicon macOS or `uv run --extra minilm-windows python -m backend.app` on Windows; start Vite with `npm run dev` in another terminal. Vite proxies `/api` to the loopback-only API. It provides protected project/version/export/restoration/backup endpoints, explicit local-model status/download/cancel endpoints, native project/document/backup pickers, and an idle session lock.
+The command starts the local API and Vite, then opens the app in your browser. Press Ctrl+C to stop the services it started. If the API is already running on port 8765, it reuses it and never kills unrelated processes. To run the services separately, start FastAPI with `uv run python -m backend.app`; start Vite with `npm run dev` in another terminal. Vite proxies `/api` to the loopback-only API. It provides protected project/version/export/restoration/backup endpoints, explicit local NER status/download/cancel endpoints, native project/document/backup pickers, and an idle session lock.
 
-To install both optional Python model runtimes, use `uv sync --inexact --extra models --extra minilm-macos` on Apple-Silicon macOS or `uv sync --inexact --extra models --extra minilm-windows` on Windows. This installs Python packages only; NER and MiniLM weights/tokenizer assets remain absent until explicitly downloaded from their controls in the saved-document review panel.
+To install the optional NER runtime, use `uv sync --inexact --extra models`. This installs Python packages only; NER weights/tokenizer assets remain absent until explicitly downloaded from the saved-document review panel.
 
-Candidate review also uses Ollaya's local CLI with the `von:1.1` model. Install Ollaya and explicitly acquire that model with `ollaya pull von:1.1` before launching Blot; Blot never downloads it. Each extracted term and its bounded local context is sent to the local Ollaya runtime for the identifier and operational-significance questions. Candidate text is supplied on the CLI's stdin and is not sent to a hosted endpoint. If Ollaya or the model is unavailable, analysis continues with existing heuristic levels and labels the semantic score as unavailable.
+Candidate review also uses Ollaya's local CLI with the `von:1.1` model. Install Ollaya and explicitly acquire that model with `ollaya pull von:1.1` before launching Blot; Blot never downloads it. Each extracted term and at most one 192-character local context snippet is sent to the local Ollaya runtime for the identifier and operational-significance questions. Candidate text is supplied on the CLI's stdin and is not sent to a hosted endpoint. If Ollaya or the model is unavailable, analysis continues with existing heuristic levels and labels the semantic score as unavailable.
 
 The backend writes each Ollaya request and raw response as a single local log line. This includes the candidate and bounded context supplied for scoring; those logs are not sent externally. Context is not stored in the encrypted project state.
 
@@ -40,7 +42,7 @@ DOCX pages are rendered locally with LibreOffice and PDF.js. Candidate mentions 
 The existing obfuscation-level slider filters by the candidate's deterministic level. Ollaya separately reports Redaction confidence and a Review Priority from 1–10; scored candidates are ordered by Review Priority (10 first). A complete pair of No answers is not automatically suggested, while explicit Include/Exclude decisions remain authoritative. If local scoring is unavailable, the app falls back to its existing heuristic behavior and identifies the missing Ollaya result.
 
 1. Open or create a local project and import the document. Select the **Original** version in the review toolbar.
-2. Review the coverage report, adjust the minimum sensitivity, include or exclude candidates, confirm or edit similar-term groups, and use Undo as needed. The visible match count follows the selected level and saved decisions.
+2. Review the coverage report, adjust the minimum sensitivity, include or exclude candidates, create or edit user-defined groups, and use Undo as needed. The visible match count follows the selected level and saved decisions.
 3. Select **Preview & export obfuscated copy**. Inspect the generated placeholders, occurrence counts, bounded output preview, and coverage warnings. Existing placeholder-like strings and unsupported Office/XLSX content require explicit acknowledgement.
 4. Select **Approve and save new version** to write a distinct obfuscated version under `.blot/outputs/` and download it for manual use. The original remains unchanged. Random placeholders are collision-checked; the term map is written only to encrypted project state, never to the output package.
 5. Use the version selector to inspect the obfuscated copy or download it again. Approval previews expire after 15 minutes and are rejected if the source bytes or version-scoped review graph changed.
@@ -64,18 +66,17 @@ The local project session locks after 15 minutes without user activity. Reopenin
 - **macOS:** run `setup-macos.command` once, then `launch-macos.command` to start Blot in a terminal and open the browser. Closing/stopping the launcher stops the service.
 - **Windows:** double-click `setup-windows.bat` once, then `launch-windows.bat`. The launcher opens the browser and stops the local Python service when the launcher exits. The `.ps1` scripts are also available for PowerShell.
 
-Both launchers bind the service to loopback. macOS setup installs the Apple-Silicon MLX runtime; Windows setup installs the PyTorch runtime. MiniLM inference is explicitly CPU-only on both platforms. Model weights remain separate, opt-in downloads. Cross-platform clean-install and OS credential-prompt acceptance is still required before release.
+Both launchers bind the service to loopback. Optional NER weights remain a separate, opt-in download. Cross-platform clean-install and OS credential-prompt acceptance is still required before release.
 
 Only adapter-supported editable text is covered. Coverage warnings are not proof that all sensitive content was found, and the app does not sanitize images/OCR, metadata, macros, embedded binaries, or unknown package surfaces.
 
-For production-like local serving on Apple-Silicon macOS, run `uv sync --inexact --extra minilm-macos`, then `npm run build` and `uv run --extra minilm-macos python -m backend.app`. On Windows, use `uv sync --inexact --extra minilm-windows` and `uv run --extra minilm-windows python -m backend.app`. Visit `http://127.0.0.1:8765/obfuscation-workspace.html`.
+For production-like local serving, run `uv sync --inexact`, then `npm run build` and `uv run python -m backend.app`. Visit `http://127.0.0.1:8765/obfuscation-workspace.html`.
 
 ## Local checks
 
 ```bash
-# Apple-Silicon macOS; on Windows use --extra minilm-windows instead
-uv run --extra minilm-macos pytest
-uv run --extra minilm-macos ruff check backend
+uv run pytest
+uv run ruff check backend
 npm test
 npm run build
 npm audit --omit=dev
@@ -92,7 +93,7 @@ Stages 6–9 now include connected review/export/restoration workflows, encrypte
 
 ## Command to Start the App
 ```
-uv sync --extra dev --extra minilm-macos
+uv sync --extra dev
 npm ci
 npm run dev:app
 ```

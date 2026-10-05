@@ -23,7 +23,7 @@ This is disclosure reduction, not a claim of anonymity or complete file sanitiza
 | Text encodings | UTF-8 with/without BOM and detectable UTF-16; reject malformed or ambiguous encodings before export. |
 | Office coverage | Aim to process editable text, including extended Office parts such as notes and other editable surfaces. The product must identify unhandled text-bearing parts and warn before the user elects to export. It must never describe that warning as proof that all sensitive content was found. |
 | Term discovery | Broad local English-language candidate discovery (entities and sensitive patterns), plus manual user selections. |
-| Similarity | RapidFuzz plus a locally run MiniLM encoder. Similarities are suggestions; the user confirms group membership before group-wide replacement. Model download is explicit and user initiated. |
+| Grouping | No automatic similar-term search. Users select candidates and create groups explicitly. |
 | Decision scope | Current document/version by default; a confirmed group can be explicitly applied to selected project files later. |
 | Slider | Fixed default 1–10 tiers for v1; manual Include/Exclude is pinned and undoable. |
 | Privacy | No LLM integrations or document telemetry. Bind only to loopback. Encrypt graph and mapping with a data key protected by the OS credential store (macOS Keychain / Windows Credential Manager). |
@@ -36,14 +36,14 @@ This is disclosure reduction, not a claim of anonymity or complete file sanitiza
 
 1. XLSX is added, including literal cell text masking and restoration. Formulas and workbook behavior are preserved; formulas themselves are not rewritten.
 2. Office coverage is broadened beyond the original narrow body-text description. The implementation must publish a per-format coverage inventory and report unsupported/unknown text-bearing parts. Because the user chose warn-and-continue, export may proceed only after explicit acknowledgement; the report must remain attached to that output/version.
-3. Candidate seeding includes broad local English entity and pattern extraction, in addition to manual selection. Similarity never silently creates an accepted replacement group.
+3. Candidate seeding includes broad local English entity and pattern extraction, in addition to manual selection. Group membership is always an explicit user action.
 4. The browser app is explicitly targeted at macOS and Windows and must include a one-click launcher.
 
 These deltas should be merged into the PRD once the technical coverage inventory and threat model are validated in Stage 1; until then, this plan is the decision record.
 
 ## Product boundaries and safety invariants
 
-- Process locally; no service may send document text or term/context embeddings to a remote endpoint. The only planned network operation is an explicit, integrity-checked model download.
+- Process locally; no service may send document text or term/context data to a remote endpoint. The only planned network operation is an explicit, integrity-checked NER model download.
 - Bind the API to `127.0.0.1`/`::1`, use a per-launch secret for browser requests, restrict origins, and reject non-local clients.
 - Keep originals immutable. Every obfuscated and restored result is a separate version.
 - Keep graph and placeholder mapping out of exported documents and logs; encrypt them at rest.
@@ -64,7 +64,7 @@ FastAPI local service ── workspace/project/version service
        ├── text adapters: UTF-8/UTF-16, TXT/MD/CSV
        ├── OOXML adapters: DOCX/PPTX/XLSX, preserving package parts
        ├── candidate pipeline: local English entity/pattern extraction
-       ├── graph/similarity: RapidFuzz + local MiniLM
+       ├── candidate graph: explicit user-defined groups
        └── security: OS credential store, encrypted portable backup
 ```
 
@@ -120,22 +120,20 @@ Development keeps the existing high-fidelity React design. Release serving must 
 
 **Implemented scope:** DOCX/PPTX archives are validated and scanned locally. The adapters traverse WordprocessingML `w:t`/`w:delText` and DrawingML `a:t` paragraph text across package XML parts, including body/slide text, tables, headers, comments, and notes. Exact replacements span split runs, retain the leading run's formatting, apply to repeated/moved tokens, and leave untouched package parts byte-identical. Bounded coverage reports list examined XML parts, skipped non-XML parts, detected text-bearing parts, and unsupported/unhandled parts; metadata, images/OCR, macros, embedded binary content, external relationship targets, and non-paragraph/unknown XML text are not processed. The adapters are available for preview and round-trip verification; export acknowledgement and product restoration workflows remain Stages 7–8.
 
-### Stage 5 — Candidate extraction, graph, and local similarity
+### Stage 5 — Candidate extraction, graph, and manual grouping
 
 - Seed English candidates with a pinned local NER model and deterministic local patterns (identifiers, dates, email/phone-like values and configurable phrase candidates); permit manual phrase selection.
-- Generate spelling/format variants with RapidFuzz and contextual proposals with MiniLM; show score and reason for every proposed edge.
-- Keep proposed graph edges distinct from confirmed groups. Add/remove/split/merge membership; prevent a manual Exclude from being overridden by auto suggestions.
+- Do not search for similar terms or generate automatic grouping proposals.
+- Allow explicit user add/remove/split/merge operations for candidate groups; preserve manual Include/Exclude decisions across re-analysis.
 - Scope decisions and occurrences to a document version. Use fixed, documented level-to-candidate defaults for the 1–10 slider.
 
-**Gate:** synthetic tests prove no unconfirmed edge causes group replacement; manual Include/Exclude stay pinned across slider changes; offline inference produces stable proposals.
+**Gate:** synthetic tests prove candidate groups are only created through explicit user actions; manual Include/Exclude stay pinned across slider changes.
 
-**Implemented foundation:** supported text blocks are scanned locally for email-like values, phone-like values, dates, identifiers, and capitalized phrase candidates. Candidate occurrences retain adapter locations and offsets; candidates are scoped to an immutable document version, assigned stable IDs, and persisted only in the AES-GCM encrypted project graph. Fixed review-level defaults are email/phone/manual = 1, dates/identifiers = 2, and capitalized phrases = 5 on the 1–10 scale. Manual phrases must occur in supported text and start Included/pinned. RapidFuzz spelling/format edges carry a score and explanation, remain `proposed`/unconfirmed, and never create group membership. Candidate Include/Exclude decisions survive repeated analysis. Explicit add/remove/split/merge group operations are available through the protected API and persist as confirmed memberships. The saved-document UI now scans candidates, lets users select/manual-add phrases, review and pin decisions, inspect proposals, and manage explicit groups; full Stage 6 remains in progress.
+**Implemented foundation:** supported text blocks are scanned locally for email-like values, phone-like values, dates, identifiers, and capitalized phrase candidates. Candidate occurrences retain adapter locations and offsets; candidates are scoped to an immutable document version, assigned stable IDs, and persisted only in the AES-GCM encrypted project graph. Fixed review-level defaults are email/phone/manual = 1, dates/identifiers = 2, and capitalized phrases = 5 on the 1–10 scale. Manual phrases must occur in supported text and start Included/pinned. Candidate Include/Exclude decisions survive repeated analysis. The saved-document UI scans candidates, supports manual phrase selection, review and pin decisions, and explicit user-defined groups; automatic spelling/contextual similarity search has been removed.
 
 **Selected NER artifact:** `knowledgator/gliner-multitask-large-v0.5`, immutable revision `7a95e168036db9ec6f914c0cc6b218edbd87f310`, Apache-2.0. The explicitly downloaded FP16 safetensors file is 880,500,126 bytes; pinned tokenizer/configuration assets bring the download to about 0.9 GB. The checkpoint is loaded in FP32 for CPU compatibility, so inference may require several GB of memory. Artifact hashes are recorded in `backend/app/model_manager.py`; the downloader verifies them before atomic installation and the offline loader verifies them again before first inference. GLiNER `0.2.29` is an optional Python extra (`uv sync --extra models`); dependencies install separately from weights. No model assets are present by default.
 
-**Selected contextual encoder:** `sentence-transformers/all-MiniLM-L6-v2`, immutable revision `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`, Apache-2.0. The explicitly downloaded safetensors checkpoint and pinned tokenizer/configuration/pooling files total 91,567,395 bytes. Local inference uses attention-mask mean pooling and normalized embeddings with CPU-only `transformers`/PyTorch; each candidate mention is masked before its bounded sentence context is embedded. Candidate context strings and vectors are transient and never persisted. Artifact hashes are recorded in `backend/app/similarity_manager.py`, verified before atomic installation and again before offline loading. The existing optional `models` extra supplies the runtime; MiniLM weights are downloaded separately and only after confirmation.
-
-**Still pending:** validate both models' quality and CPU/memory performance on synthetic fixtures after a user explicitly downloads the artifacts; and pass the full Stage 5 acceptance gate. Sensitivity-threshold filtering and visibility of manual Include/Exclude decisions are covered by focused UI logic tests. Heuristic phrase discovery and RapidFuzz proposals remain available when either optional model is absent or unavailable.
+**Still pending:** validate the optional NER model's quality and CPU/memory performance on synthetic fixtures after a user explicitly downloads the artifact; and pass the full Stage 5 acceptance gate. Sensitivity-threshold filtering and visibility of manual Include/Exclude decisions are covered by focused UI logic tests.
 
 ### Stage 6 — Review workflow in the preserved React design
 
@@ -146,7 +144,7 @@ Development keeps the existing high-fidelity React design. Release serving must 
 
 **Gate:** acceptance flows can be completed without dev tools; narrow/wide slider behavior and manual overrides match golden tests; responsive layout and keyboard checks pass.
 
-**Implemented:** saved project documents and their original/obfuscated versions are selectable in the review surface; empty projects have an import prompt and demo files no longer appear as project files. The saved-document preview exposes adapter/encoding, editable-text scope, unsupported-part warnings, bounded DOCX/PPTX text sections with keyboard navigation, dense text mode, sensitivity scoring and filtering, Include/Exclude decisions with group propagation that preserves pinned exclusions, review counts, manual phrase selection, proposal/group operations, and Undo. Slider, graph edits, file/version changes close any pending export preview. The design source remains intact; added responsive controls and an accessible preview/export dialog. Browser-based visual and keyboard acceptance remains to be performed.
+**Implemented:** saved project documents and their original/obfuscated versions are selectable in the review surface; empty projects have an import prompt and demo files no longer appear as project files. The saved-document preview exposes adapter/encoding, editable-text scope, unsupported-part warnings, bounded DOCX/PPTX text sections with keyboard navigation, dense text mode, sensitivity scoring and filtering, Include/Exclude decisions with group propagation that preserves pinned exclusions, review counts, manual phrase selection, explicit group creation and management, and Undo. Slider, graph edits, file/version changes close any pending export preview. The design source remains intact; added responsive controls and an accessible preview/export dialog. Browser-based visual and keyboard acceptance remains to be performed.
 
 ### Stage 7 — Obfuscation preview and export
 
@@ -156,7 +154,7 @@ Development keeps the existing high-fidelity React design. Release serving must 
 
 **Gate:** exported synthetic fixtures contain only expected placeholders; no source map/graph is present; unknown/unsupported coverage is reported; approval invalidates correctly.
 
-**Implemented:** protected APIs produce a bounded output preview and random 128-bit placeholders after collision checks against source tokens and the encrypted project map. Case-insensitive replacements preserve supported text encodings, CSV quoting, Office package structure, and XLSX formulas through the existing adapters. A preview plan is short-lived and binds source bytes/version, slider level, candidates, confirmed groups, and proposal edges; export rejects changed or expired plans. Office/XLSX coverage and pre-existing placeholder warnings require explicit acknowledgement. Approval saves a distinct obfuscated version under `.blot/outputs/`, writes term mappings only to the AES-GCM-encrypted state, and enables protected download/version preview. Synthetic tests cover warning acknowledgement, immutable originals, private maps, output downloads/version listing, exact supported replacements, and stale-graph rejection. Browser-based end-to-end acceptance remains to be performed.
+**Implemented:** protected APIs produce a bounded output preview and random 128-bit placeholders after collision checks against source tokens and the encrypted project map. Case-insensitive replacements preserve supported text encodings, CSV quoting, Office package structure, and XLSX formulas through the existing adapters. A preview plan is short-lived and binds source bytes/version, slider level, candidates, and user-defined groups; export rejects changed or expired plans. Office/XLSX coverage and pre-existing placeholder warnings require explicit acknowledgement. Approval saves a distinct obfuscated version under `.blot/outputs/`, writes term mappings only to the AES-GCM-encrypted state, and enables protected download/version preview. Synthetic tests cover warning acknowledgement, immutable originals, private maps, output downloads/version listing, exact supported replacements, and stale-graph rejection. Browser-based end-to-end acceptance remains to be performed.
 
 ### Stage 8 — Returned Office restoration
 
@@ -203,8 +201,8 @@ Development keeps the existing high-fidelity React design. Release serving must 
 ## Risks to manage
 
 1. “Everything editable” spans many vendor-specific OOXML parts. Maintain a tested support matrix and warn-and-continue exactly as chosen; never represent warnings as complete coverage.
-2. Broad candidate discovery increases false positives. Candidate suggestions and similarity edges remain user-reviewed; the slider is a review aid, not a sensitivity score.
-3. MiniLM/NER downloads add size, licensing, integrity, offline, and update concerns. Pin model revisions and hashes; download only by explicit action.
+2. Broad candidate discovery increases false positives. Candidates and user-defined groups remain reviewable; the slider is a review aid, not a sensitivity score.
+3. Optional NER downloads add size, licensing, integrity, offline, and update concerns. Pin model revisions and hashes; download only by explicit action.
 4. Cross-platform OS key stores differ. Test real macOS and Windows accounts and define key-loss recovery before storing irreplaceable mappings.
 5. OOXML round-trip libraries may discard parts. Prefer tested package-preserving transformations; fail visibly on preservation anomalies and compare package structures in tests.
 6. The supplied React app is currently a browser-only prototype. Its session-only behavior and sample DOCX/PPTX rows are not production processing; each feature must be connected to the local API before it is labeled complete.
@@ -217,11 +215,11 @@ Development keeps the existing high-fidelity React design. Release serving must 
 - [x] Stage 2: native project/document pickers, create/open/import UI and API, SQLite document/version records, read-only source copies, OS-protected data key, AES-GCM-encrypted graph/map sidecar, and missing-key errors.
 - [x] Stage 3: strict UTF-8/UTF-16 TXT/MD parsing; structure-preserving CSV scanning/replacement; safe XLSX literal-cell preview/replacement with formula/package preservation and coverage warnings; protected bounded preview API/UI; placeholder-like text count.
 - [x] Stage 4: safe DOCX/PPTX package parsing and exact paragraph-text replacement across split runs; bounded local text previews; detected coverage inventory for unsupported parts; synthetic format-preservation and round-trip tests.
-- [~] Stage 5 foundation: deterministic local pattern candidates, manual phrase candidates, encrypted version-scoped graph storage, candidate Include/Exclude pinning, unconfirmed RapidFuzz proposals, local MiniLM contextual proposals with masked mentions, and explicit confirmed group operations. Sensitivity-threshold filtering and pinned-decision visibility have focused unit coverage. Fixed-revision Apache-2.0 GLiNER and MiniLM artifacts have confirmed-only, integrity-checked download paths and an optional local runtime; artifact acquisition and real inference/quality/performance validation remain pending before the full acceptance gate.
+- [~] Stage 5 foundation: deterministic local pattern candidates, manual phrase candidates, encrypted version-scoped graph storage, candidate Include/Exclude pinning, and explicit confirmed group operations. Automatic similar-term search has been removed. Sensitivity-threshold filtering and pinned-decision visibility have focused unit coverage. The fixed-revision Apache-2.0 GLiNER artifact has a confirmed-only, integrity-checked download path and optional local runtime; artifact acquisition and real inference/quality/performance validation remain pending before the full acceptance gate.
 - [~] Stage 6 review workflow: saved document/version selection, import/parse status, bounded editable-text preview, candidate sensitivity scores and threshold filter, match/review counts, Include/Exclude/group decisions, Undo, coverage reporting, DOCX/PPTX section navigation, dense mode, accessible controls, and an empty-project import state. Keyboard interaction is implemented; responsive browser/keyboard acceptance is pending.
 - [~] Stage 7 obfuscation preview/export: cryptographically random collision-checked placeholders, encrypted-only mappings, exact output preview, explicit coverage acknowledgement, immutable output versions, protected repeat download, and approval invalidation for source/graph/level changes. Backend synthetic integration tests pass; browser-based flow validation remains pending.
 - [~] Stage 8 returned Office restoration: exact version-scoped restoration, unresolved reporting, and immutable restored versions are implemented and covered by synthetic integration tests.
 - [~] Stage 9 release hardening: encrypted portable backup/restore, 15-minute idle locking, resumable integrity-checked model downloads, and macOS/Windows setup/launch scripts are implemented; actual OS prompt/platform acceptance remains pending.
 - [~] Stage 10 pilot/release acceptance: synthetic end-to-end acceptance coverage is implemented; user pilot, browser accessibility/responsiveness, Windows/macOS installation, model inference/resource, and 100 MB performance gates remain pending.
 
-**Current boundary:** Stages 6–9 now have connected saved-project UI/API workflows, synthetic tests, and launch/bootstrap assets. Stage 10 has a synthetic end-to-end acceptance foundation, not a completed pilot or release sign-off. Actual OS credential prompts and setup/teardown remain unverified on Windows and require hands-on macOS acceptance; the idle gate delegates the unlock check to the OS credential-store provider. Pinned NER/MiniLM artifacts remain opt-in and unacquired by default; real inference quality/resource limits, offline acceptance, browser accessibility/responsiveness, and 100 MB performance are outstanding. Unsupported-part warnings remain attached to previews/versions and require acknowledgement before export.
+**Current boundary:** Stages 6–9 now have connected saved-project UI/API workflows, synthetic tests, and launch/bootstrap assets. Stage 10 has a synthetic end-to-end acceptance foundation, not a completed pilot or release sign-off. Actual OS credential prompts and setup/teardown remain unverified on Windows and require hands-on macOS acceptance; the idle gate delegates the unlock check to the OS credential-store provider. The pinned NER artifact remains opt-in and unacquired by default; real inference quality/resource limits, offline acceptance, browser accessibility/responsiveness, and 100 MB performance are outstanding. Unsupported-part warnings remain attached to previews/versions and require acknowledgement before export.

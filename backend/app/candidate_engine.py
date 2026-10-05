@@ -1,27 +1,17 @@
 from __future__ import annotations
 
 import hashlib
-import heapq
-import math
 import re
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import pairwise
 
-from rapidfuzz import fuzz
-
 from .document_adapters import ParsedDocument
 
 MAX_CANDIDATES_PER_VERSION = 1_000
 MAX_CANDIDATES_PER_CATEGORY = 1_000
 MAX_OCCURRENCES_PER_CANDIDATE = 2_000
-MAX_PROPOSALS_PER_VERSION = 1_000
-FUZZY_PROPOSAL_THRESHOLD = 88.0
-CONTEXTUAL_PROPOSAL_THRESHOLD = 0.72
-MAX_CONTEXTS_PER_CANDIDATE = 3
-MAX_CONTEXT_WINDOW_CHARS = 192
-
 # Priorities run from 2 (most sensitive) to 10 (least sensitive). These are
 # heuristics for filtering, not a guarantee that every occurrence was found.
 CANDIDATE_PRIORITY_LEVELS = {
@@ -67,9 +57,6 @@ _NUMERIC_DATE = re.compile(
 _IDENTIFIER = re.compile(r"\b(?:[A-Z]{2,}[\w]*[-_/][A-Z0-9][A-Z0-9_-]*|[A-Z]{2,}\d{2,})\b")
 _CAPITALIZED_TOKEN = re.compile(r"(?<![\w])(?:[A-Z][a-z]+(?:[’'-][A-Z]?[a-z]+)*|[A-Z]\.)(?![\w])")
 _COMMON_SENTENCE_STARTERS = {"a", "an", "at", "contact", "for", "from", "in", "on", "owner", "please", "reference", "the", "to"}
-_NORMALIZE = re.compile(r"[^\w]+", re.UNICODE)
-
-
 @dataclass(frozen=True)
 class CandidateBlock:
     location: str
@@ -115,8 +102,8 @@ def analyze_candidates(
     manual_terms: Iterable[str] = (),
     ner_entities: Iterable[dict[str, object]] = (),
     on_candidate: Callable[[dict[str, object]], None] | None = None,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Extract conservative local candidates and unconfirmed fuzzy proposals."""
+) -> list[dict[str, object]]:
+    """Extract conservative local candidates without automatic similarity matching."""
     blocks = tuple(blocks)
     preserved = {
         str(node.get("term", "")).casefold(): node
@@ -291,268 +278,7 @@ def analyze_candidates(
         if len(nodes) >= MAX_CANDIDATES_PER_VERSION:
             break
 
-    return nodes, propose_variants(nodes)
-
-
-def propose_variants(nodes: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Suggest lexical variants; these edges never imply confirmed membership."""
-    candidates = sorted(nodes, key=lambda node: str(node["id"]))[:MAX_CANDIDATES_PER_VERSION]
-    proposals: list[dict[str, object]] = []
-    for index, first in enumerate(candidates):
-        first_term = str(first["term"])
-        if len(first_term) < 4:
-            continue
-        for second in candidates[index + 1 :]:
-            second_term = str(second["term"])
-            if len(second_term) < 4 or first_term.casefold() == second_term.casefold():
-                continue
-            score = float(fuzz.ratio(first_term, second_term))
-            normalized_score = float(fuzz.ratio(_normalize_term(first_term), _normalize_term(second_term)))
-            score = max(score, normalized_score)
-            if score < FUZZY_PROPOSAL_THRESHOLD:
-                continue
-            proposals.append(
-                {
-                    "id": hashlib.sha256(f"{first['id']}\0{second['id']}".encode()).hexdigest()[:24],
-                    "sourceId": first["id"],
-                    "targetId": second["id"],
-                    "score": round(score, 1),
-                    "method": "rapidfuzz",
-                    "scores": {"rapidfuzz": round(score, 1)},
-                    "reason": f"RapidFuzz spelling/format similarity ({score:.1f}%)",
-                    "status": "proposed",
-                    "confirmed": False,
-                }
-            )
-            if len(proposals) >= MAX_PROPOSALS_PER_VERSION:
-                return proposals
-    return proposals
-
-
-def propose_contextual_variants(
-    nodes: list[dict[str, object]],
-    blocks: Iterable[CandidateBlock],
-    embed_contexts: Callable[[list[str]], list[list[float]]],
-    *,
-    threshold: float = CONTEXTUAL_PROPOSAL_THRESHOLD,
-    similarity_matrix: Callable[[list[list[float]]], list[list[float]]] | None = None,
-) -> list[dict[str, object]]:
-    """Suggest unconfirmed pairs from locally embedded, mention-masked contexts."""
-    contexts_by_id = _contexts_by_candidate(nodes, blocks)
-    if len(contexts_by_id) < 2:
-        return []
-
-    centroids = _embed_candidate_contexts(contexts_by_id, embed_contexts)
-    candidate_ids = sorted(centroids)
-    vectors = [centroids[candidate_id] for candidate_id in candidate_ids]
-    matrix = similarity_matrix(vectors) if similarity_matrix else None
-    return _rank_contextual_pairs(candidate_ids, vectors, matrix, threshold)
-
-
-def _contexts_by_candidate(
-    nodes: list[dict[str, object]],
-    blocks: Iterable[CandidateBlock],
-) -> dict[str, list[str]]:
-    block_text = {block.location: block.text for block in blocks}
-    return {
-        str(node["id"]): contexts
-        for node in sorted(nodes, key=lambda item: str(item["id"]))[:MAX_CANDIDATES_PER_VERSION]
-        if (contexts := _candidate_contexts(node, block_text))
-    }
-
-
-def _embed_candidate_contexts(
-    contexts_by_id: dict[str, list[str]],
-    embed_contexts: Callable[[list[str]], list[list[float]]],
-) -> dict[str, list[float]]:
-    owners = [candidate_id for candidate_id, contexts in contexts_by_id.items() for _ in contexts]
-    texts = [context for contexts in contexts_by_id.values() for context in contexts]
-    embeddings = embed_contexts(texts)
-    _validate_embeddings(embeddings, len(texts))
-    dimensions = len(embeddings[0])
-    sums: dict[str, list[float]] = {}
-    counts: dict[str, int] = {}
-    for candidate_id, vector in zip(owners, embeddings, strict=True):
-        total = sums.setdefault(candidate_id, [0.0] * dimensions)
-        for index, value in enumerate(vector):
-            total[index] += value
-        counts[candidate_id] = counts.get(candidate_id, 0) + 1
-    return {
-        candidate_id: _normalize_vector([value / counts[candidate_id] for value in total])
-        for candidate_id, total in sums.items()
-    }
-
-
-def _validate_embeddings(embeddings: list[list[float]], expected_count: int) -> None:
-    if len(embeddings) != expected_count:
-        raise CandidateError("The local contextual model returned an invalid embedding count.")
-    dimensions = len(embeddings[0]) if embeddings else 0
-    if dimensions == 0 or any(len(vector) != dimensions for vector in embeddings):
-        raise CandidateError("The local contextual model returned invalid embeddings.")
-    if any(not math.isfinite(value) for vector in embeddings for value in vector):
-        raise CandidateError("The local contextual model returned invalid embeddings.")
-
-
-def _rank_contextual_pairs(
-    candidate_ids: list[str],
-    vectors: list[list[float]],
-    matrix: list[list[float]] | None,
-    threshold: float,
-) -> list[dict[str, object]]:
-    _validate_similarity_matrix(matrix, len(candidate_ids))
-    best_pairs: list[tuple[float, str, str]] = []
-    for index, first_id in enumerate(candidate_ids):
-        for second_index in range(index + 1, len(candidate_ids)):
-            second_id = candidate_ids[second_index]
-            pair = (
-                _pair_similarity(vectors, matrix, index, second_index),
-                first_id,
-                second_id,
-            )
-            _keep_best_pair(best_pairs, pair, threshold)
-    return [_contextual_proposal(pair) for pair in sorted(best_pairs, reverse=True)]
-
-
-def _validate_similarity_matrix(matrix: list[list[float]] | None, candidate_count: int) -> None:
-    if matrix is not None and (
-        len(matrix) != candidate_count
-        or any(len(row) != candidate_count for row in matrix)
-    ):
-        raise CandidateError("The local contextual model returned an invalid similarity matrix.")
-
-
-def _pair_similarity(
-    vectors: list[list[float]],
-    matrix: list[list[float]] | None,
-    first_index: int,
-    second_index: int,
-) -> float:
-    if matrix is not None:
-        return matrix[first_index][second_index]
-    return sum(
-        left * right
-        for left, right in zip(vectors[first_index], vectors[second_index], strict=True)
-    )
-
-
-def _keep_best_pair(
-    best_pairs: list[tuple[float, str, str]],
-    pair: tuple[float, str, str],
-    threshold: float,
-) -> None:
-    if pair[0] < threshold:
-        return
-    if len(best_pairs) < MAX_PROPOSALS_PER_VERSION:
-        heapq.heappush(best_pairs, pair)
-    elif pair > best_pairs[0]:
-        heapq.heapreplace(best_pairs, pair)
-
-
-def _contextual_proposal(pair: tuple[float, str, str]) -> dict[str, object]:
-    score, first_id, second_id = pair
-    percentage = round(max(0.0, min(1.0, score)) * 100, 1)
-    return {
-        "id": hashlib.sha256(f"minilm\0{first_id}\0{second_id}".encode()).hexdigest()[:24],
-        "sourceId": first_id,
-        "targetId": second_id,
-        "score": percentage,
-        "method": "minilm",
-        "scores": {"minilm": percentage},
-        "reason": f"MiniLM contextual similarity ({percentage:.1f}% cosine; candidate mentions masked)",
-        "status": "proposed",
-        "confirmed": False,
-    }
-
-
-def merge_proposals(*proposal_sets: Iterable[dict[str, object]]) -> list[dict[str, object]]:
-    """Combine evidence for a pair without duplicating its review edge."""
-    merged: dict[tuple[str, str], dict[str, object]] = {}
-    for proposals in proposal_sets:
-        for proposal in proposals:
-            pair = tuple(sorted((str(proposal["sourceId"]), str(proposal["targetId"]))))
-            current = merged.get(pair)
-            if current is None:
-                merged[pair] = dict(proposal)
-                continue
-            current_scores = dict(current.get("scores", {}))
-            current_scores.update(dict(proposal.get("scores", {})))
-            methods = set(current.get("methods", [current.get("method", "unknown")]))
-            methods.add(str(proposal.get("method", "unknown")))
-            current["scores"] = current_scores
-            current["methods"] = sorted(methods)
-            current["method"] = "combined"
-            current["score"] = max(float(value) for value in current_scores.values())
-            if proposal.get("reason") not in str(current.get("reason", "")):
-                current["reason"] = f"{current.get('reason', '')}; {proposal.get('reason', '')}"
-    def proposal_rank(proposal: dict[str, object]) -> tuple[int, float, str]:
-        methods = proposal.get("methods", [proposal.get("method", "unknown")])
-        priority = 0 if len(methods) > 1 else 1 if "minilm" in methods else 2
-        return (priority, -float(proposal.get("score", 0.0)), str(proposal["id"]))
-
-    return sorted(merged.values(), key=proposal_rank)[:MAX_PROPOSALS_PER_VERSION]
-
-
-def _candidate_contexts(node: dict[str, object], block_text: dict[str, str]) -> list[str]:
-    raw_occurrences = node.get("occurrences", [])
-    if not isinstance(raw_occurrences, list) or not raw_occurrences:
-        return []
-    contexts = []
-    for occurrence in _sample_occurrences(raw_occurrences):
-        context = _context_for_occurrence(occurrence, block_text)
-        if context is not None:
-            contexts.append(context)
-    return contexts
-
-
-def _sample_occurrences(occurrences: list[object]) -> list[object]:
-    if len(occurrences) <= MAX_CONTEXTS_PER_CANDIDATE:
-        return occurrences
-    indices = {
-        round(index * (len(occurrences) - 1) / (MAX_CONTEXTS_PER_CANDIDATE - 1))
-        for index in range(MAX_CONTEXTS_PER_CANDIDATE)
-    }
-    return [occurrences[index] for index in sorted(indices)]
-
-
-def _context_for_occurrence(occurrence: object, block_text: dict[str, str]) -> str | None:
-    if not isinstance(occurrence, dict):
-        return None
-    text = block_text.get(str(occurrence.get("location", "")))
-    start = occurrence.get("start")
-    end = occurrence.get("end")
-    if text is None or not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end <= len(text):
-        return None
-    prefix = _trim_context_left(text[max(0, start - MAX_CONTEXT_WINDOW_CHARS) : start])
-    suffix = _trim_context_right(text[end : min(len(text), end + MAX_CONTEXT_WINDOW_CHARS)])
-    if sum(char.isalpha() for char in f"{prefix}{suffix}") < 4:
-        return None
-    context = " ".join(f"{prefix} [ENTITY] {suffix}".split())
-    return context[: MAX_CONTEXT_WINDOW_CHARS * 2 + 8] if context else None
-
-
-def _trim_context_left(prefix: str) -> str:
-    cut_points = [
-        prefix.rfind(boundary) + len(boundary)
-        for boundary in ("\n", ". ", "! ", "? ")
-        if prefix.rfind(boundary) >= 0
-    ]
-    return prefix[max(cut_points) :] if cut_points else prefix
-
-
-def _trim_context_right(suffix: str) -> str:
-    cut_points = [
-        position
-        for boundary in ("\n", ". ", "! ", "? ")
-        if (position := suffix.find(boundary)) >= 0
-    ]
-    return suffix[: min(cut_points)] if cut_points else suffix
-
-
-def _normalize_vector(vector: list[float]) -> list[float]:
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0 or not math.isfinite(norm):
-        raise CandidateError("The local contextual model returned invalid embeddings.")
-    return [value / norm for value in vector]
+    return nodes
 
 
 def decide_candidate(nodes: list[dict[str, object]], candidate_id: str, decision: str) -> dict[str, object]:
@@ -668,10 +394,6 @@ def _priority_level(category: str, ner_labels: set[str], ner_score: float) -> in
 
 def _candidate_id(version_id: str, normalized_term: str) -> str:
     return hashlib.sha256(f"{version_id}\0{normalized_term}".encode()).hexdigest()[:24]
-
-
-def _normalize_term(term: str) -> str:
-    return _NORMALIZE.sub("", term.casefold())
 
 
 def _capitalized_phrase_matches(text: str) -> Iterable[tuple[int, int]]:

@@ -15,20 +15,10 @@ const groups = [
     term: 'Alex Tan',
     members: ['Alex Tan', 'A. Tan'],
     confidence: '96%',
-    reason: 'Alias + formatting variant',
+    reason: 'Example manually confirmed group',
     token: 'T_001',
     level: 2,
     confirmed: true,
-  },
-  {
-    id: 'cedar',
-    term: 'Project Cedar',
-    members: ['Project Cedar', 'Cedar'],
-    confidence: '89%',
-    reason: 'Contextual similarity · confirm before grouping',
-    token: 'T_002',
-    level: 8,
-    confirmed: false,
   },
 ];
 
@@ -127,7 +117,6 @@ export default function App() {
   const [localToken, setLocalToken] = useState('');
   const [serviceAvailable, setServiceAvailable] = useState(false);
   const [nerModelStatus, setNerModelStatus] = useState(null);
-  const [minilmModelStatus, setMinilmModelStatus] = useState(null);
   const [currentProject, setCurrentProject] = useState(null);
   const [recentProjects, setRecentProjects] = useState(readRecentProjects);
   const [projectBusy, setProjectBusy] = useState(false);
@@ -144,6 +133,7 @@ export default function App() {
   const [unlockBusy, setUnlockBusy] = useState(false);
   const [manualPhrase, setManualPhrase] = useState('');
   const [mergeGroupIds, setMergeGroupIds] = useState([]);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState([]);
   const [toast, setToast] = useState('');
   const [undo, setUndo] = useState(null);
   const [termContextMenu, setTermContextMenu] = useState(null);
@@ -183,13 +173,7 @@ export default function App() {
     : [];
   const candidatesById = Object.fromEntries(candidates.map((candidate) => [candidate.id, candidate]));
   const candidateGroups = activeFile.candidateGroups || [];
-  const proposals = (activeFile.proposals || []).filter((proposal) => (
-    candidatesById[proposal.sourceId]
-    && candidatesById[proposal.targetId]
-    && !candidateGroups.some((group) => (
-      group.candidateIds.includes(proposal.sourceId) && group.candidateIds.includes(proposal.targetId)
-    ))
-  ));
+  const groupedCandidateIds = new Set(candidateGroups.flatMap((group) => group.candidateIds));
   const candidateDecisionCounts = getCandidateDecisionCounts(candidates);
   const notIncludedByLevelCount = getCandidatesNotSelectedAtLevel(candidates, level);
   const previewCoverage = activeFile.previewCoverage;
@@ -222,23 +206,17 @@ export default function App() {
     const refreshModelStatus = async () => {
       try {
         const headers = { 'X-Local-App-Token': localToken };
-        const [nerResponse, minilmResponse] = await Promise.all([
-          fetch('/api/models/ner/status', { headers, cache: 'no-store' }),
-          fetch('/api/models/minilm/status', { headers, cache: 'no-store' }),
-        ]);
-        const [ner, minilm] = await Promise.all([nerResponse.json(), minilmResponse.json()]);
+        const nerResponse = await fetch('/api/models/ner/status', { headers, cache: 'no-store' });
+        const ner = await nerResponse.json();
         if (!nerResponse.ok) throw new Error(ner.detail || 'Could not check local NER model status');
-        if (!minilmResponse.ok) throw new Error(minilm.detail || 'Could not check local MiniLM model status');
         if (cancelled) return;
         setNerModelStatus(ner);
-        setMinilmModelStatus(minilm);
-        if (ner.status === 'downloading' || minilm.status === 'downloading') {
+        if (ner.status === 'downloading') {
           timer = window.setTimeout(refreshModelStatus, 1000);
         }
       } catch (error) {
         if (!cancelled) {
           setNerModelStatus({ status: 'unavailable', error: error.message });
-          setMinilmModelStatus({ status: 'unavailable', error: error.message });
         }
       }
     };
@@ -247,7 +225,7 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [localToken, nerModelStatus?.status, minilmModelStatus?.status]);
+  }, [localToken, nerModelStatus?.status]);
 
   useEffect(() => {
     if (!localToken) return undefined;
@@ -646,9 +624,10 @@ export default function App() {
     setExportPreview(null);
     setFiles((current) => current.map((file) => (
       file.id === documentId
-        ? { ...file, candidates: [], proposals: [], candidateLoading: true, candidateProgress: 0, candidateError: '' }
+        ? { ...file, candidates: [], candidateLoading: true, candidateProgress: 0, candidateError: '' }
         : file
     )));
+    setSelectedCandidateIds([]);
     try {
       const response = await fetch('/api/projects/document-candidates/stream', {
         method: 'POST',
@@ -689,13 +668,11 @@ export default function App() {
             ? {
               ...file,
               candidates: data.candidates,
-              proposals: data.proposals,
               candidateGroups: data.groups,
-              candidateLimitReached: data.candidateLimitReached || data.proposalLimitReached,
+              candidateLimitReached: data.candidateLimitReached,
               nerTruncated: data.nerTruncated || false,
               nerCandidateCount: data.nerCandidateCount || 0,
               nerWarning: data.nerWarning || '',
-              similarityWarning: data.similarityWarning || '',
               ollayaWarning: data.ollayaWarning || '',
               candidateLoaded: true,
               candidateLoading: false,
@@ -752,36 +729,6 @@ export default function App() {
       setNerModelStatus(data);
     } catch (error) {
       setNerModelStatus((current) => ({ ...(current || {}), error: error.message }));
-    }
-  };
-
-  const downloadMiniLMModel = async () => {
-    if (!localToken || !window.confirm('Download the Apache-2.0 MiniLM model and tokenizer (~92 MB) now? This starts a network download. The model processes masked local context only; document text is not uploaded.')) return;
-    try {
-      const response = await fetch('/api/models/minilm/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
-        body: JSON.stringify({ confirmed: true }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Could not start the MiniLM download');
-      setMinilmModelStatus(data);
-    } catch (error) {
-      setMinilmModelStatus((current) => ({ ...(current || {}), status: 'failed', error: error.message }));
-    }
-  };
-
-  const cancelMiniLMModelDownload = async () => {
-    try {
-      const response = await fetch('/api/models/minilm/download', {
-        method: 'DELETE',
-        headers: { 'X-Local-App-Token': localToken },
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Could not cancel the MiniLM download');
-      setMinilmModelStatus(data);
-    } catch (error) {
-      setMinilmModelStatus((current) => ({ ...(current || {}), error: error.message }));
     }
   };
 
@@ -979,6 +926,7 @@ export default function App() {
         file.id === activeFile.id ? { ...file, candidateGroups: data.groups } : file
       )));
       setMergeGroupIds([]);
+      setSelectedCandidateIds([]);
       setToast(operation === 'add' ? 'Created a confirmed group. It remains separate from candidate Include/Exclude decisions.' : 'Updated confirmed group membership');
     } catch (error) {
       setToast(error.message || 'Could not update confirmed groups');
@@ -1659,15 +1607,6 @@ export default function App() {
                   {nerModelStatus?.error && <p className="candidate-error" role="alert">{nerModelStatus.error}</p>}
                   <small className="ner-model-note">Apache-2.0 · pinned files · explicit download · may use several GB RAM · suggestions only</small>
                 </div>
-                <div className="ner-model-panel" aria-label="Local MiniLM contextual similarity model">
-                  <div className="ner-model-heading"><strong>Contextual similarity · MiniLM</strong><span role="status" aria-live="polite">{minilmModelStatus?.installed ? (minilmModelStatus.runtimeAvailable ? 'Installed · offline ready' : 'Model installed · runtime setup needed') : minilmModelStatus?.status === 'downloading' ? 'Downloading model…' : 'Not downloaded · RapidFuzz remains active'}</span></div>
-                  {minilmModelStatus?.status === 'downloading' && <div className="ner-download-progress"><progress max={minilmModelStatus.totalBytes || minilmModelStatus.sizeBytes || 1} value={minilmModelStatus.downloadedBytes || 0} aria-label="MiniLM model download progress" /><span>{Math.floor(100 * (minilmModelStatus.downloadedBytes || 0) / (minilmModelStatus.totalBytes || minilmModelStatus.sizeBytes || 1))}%</span><button className="small-btn" type="button" onClick={cancelMiniLMModelDownload}>Cancel</button></div>}
-                  {!minilmModelStatus?.installed && minilmModelStatus?.status !== 'downloading' && <button className="small-btn ner-download-button" type="button" onClick={downloadMiniLMModel} disabled={!localToken}>Download MiniLM and tokenizer · ~92 MB</button>}
-                  {minilmModelStatus?.installed && !minilmModelStatus.runtimeAvailable && <p className="ner-model-note">Install with <code>uv sync --extra models</code>, then reload the app to enable offline similarity.</p>}
-                  {minilmModelStatus?.error && <p className="candidate-error" role="alert">{minilmModelStatus.error}</p>}
-                  <small className="ner-model-note">Apache-2.0 · pinned files · explicit download · entity mentions are masked · suggestions only</small>
-                  {minilmModelStatus?.installed && minilmModelStatus.runtimeAvailable && activeFile.candidateLoaded && <button className="small-btn" type="button" disabled={activeFile.candidateLoading} onClick={() => loadProjectDocumentCandidates(activeFile.id)}>Re-scan for contextual proposals</button>}
-                </div>
                 <label className="dense-toggle"><input type="checkbox" checked={denseText} onChange={(event) => setDenseText(event.target.checked)} /> Dense text view</label>
                 {previewSections.length > 1 && <div className="preview-navigation" role="group" aria-label="Preview section navigation" aria-describedby="preview-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}>
                   <span className="sr-only" id="preview-navigation-help">Use Left or Right Arrow to move between sections, or Home and End to jump to the first and last sections.</span>
@@ -1684,17 +1623,23 @@ export default function App() {
                   <span><strong>{candidateDecisionCounts.included}</strong> included</span>
                   <span><strong>{candidateDecisionCounts.excluded}</strong> excluded</span>
                   {notIncludedByLevelCount > 0 && <span><strong>{notIncludedByLevelCount}</strong> not selected at this level</span>}
-                  <span><strong>{proposals.length}</strong> proposals not in a group</span>
+                </div>
+                <div className="candidate-subsection">
+                  <div className="candidate-subhead">Manual groups</div>
+                  <p>Select at least two ungrouped candidates to apply decisions to them together.</p>
+                  <button className="small-btn" type="button" disabled={activeFile.candidateLoading || selectedCandidateIds.length < 2} onClick={() => applyCandidateGroupOperation('add', selectedCandidateIds)}>
+                    Group selected candidates ({selectedCandidateIds.length})
+                  </button>
                 </div>
                 <div className="graph-list">
                   {activeFile.candidateLoading && <p role="status">{activeFile.candidateProgress ? `Scanning supported text locally… ${activeFile.candidateProgress} candidate words found.` : 'Scanning supported text locally…'}</p>}
                   {activeFile.candidateError && <p className="candidate-error" role="alert">{activeFile.candidateError} <button className="small-btn" onClick={() => loadProjectDocumentCandidates(activeFile.id)}>Retry</button></p>}
-                  {activeFile.candidateLimitReached && <p className="candidate-limit">Candidate or proposal list reached its display limit.</p>}
+                  {activeFile.candidateLimitReached && <p className="candidate-limit">Candidate list reached its display limit.</p>}
                   {activeFile.nerTruncated && <p className="candidate-limit" role="status">The local NER scan was capped at 250,000 supported-text characters; some text was not analyzed by the model.</p>}
                   {activeFile.nerWarning && <p className="candidate-error" role="status">{activeFile.nerWarning}</p>}
-                  {activeFile.similarityWarning && <p className="candidate-error" role="status">{activeFile.similarityWarning}</p>}
                   {activeFile.ollayaWarning && <p className="candidate-error" role="status">{activeFile.ollayaWarning}</p>}
                   {visibleCandidates.map((candidate) => <div className="graph-card candidate-card" key={candidate.id}>
+                    <label className="candidate-group-select"><input type="checkbox" aria-label={`Select ${candidate.term} for a manual group`} checked={selectedCandidateIds.includes(candidate.id)} disabled={activeFile.candidateLoading || groupedCandidateIds.has(candidate.id)} onChange={(event) => setSelectedCandidateIds((current) => event.target.checked ? [...current, candidate.id] : current.filter((id) => id !== candidate.id))} />Group with another candidate</label>
                     <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">Level {candidate.level} · Review Priority {candidate.reviewPriority == null ? '—' : `${candidate.reviewPriority}/10`}</span></div>
                     <p className="graph-reason">Redaction confidence {candidate.redactionConfidence == null ? candidate.scoreStatus === 'complete' ? 'no affirmative signal' : 'unavailable' : `${Math.round(candidate.redactionConfidence * 100)}%`}{candidate.scoreStatus === 'complete' && candidate.redactionConfidence == null ? ' · not auto-suggested' : ''} · {candidate.nerLabels?.length ? `NER · ${candidate.nerLabels.join(', ')} · model score ${Math.round((candidate.nerScore || 0) * 100)}%${candidate.source === 'manual' ? ' · manual' : ''}` : `${candidate.category.replaceAll('_', ' ').toLowerCase()} · ${candidate.source}`} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'}</p>
                     {candidate.signals && <p className="candidate-location">Ollaya {candidate.scoringModel || 'fallback'} · identifier: {candidate.signals.isIdentifier ? `${candidate.signals.isIdentifier.answer} (${Math.round(candidate.signals.isIdentifier.probabilityYes * 100)}% yes)` : 'unavailable'} · operational significance: {candidate.signals.hasOperationalSignificance ? `${candidate.signals.hasOperationalSignificance.answer} (${Math.round(candidate.signals.hasOperationalSignificance.probabilityYes * 100)}% yes)` : 'unavailable'}{candidate.reasons?.length ? ` · ${candidate.reasons.join('; ')}` : ''}</p>}
@@ -1706,7 +1651,6 @@ export default function App() {
                   </div>)}
                   {!activeFile.candidateLoading && !activeFile.candidateError && visibleCandidates.length === 0 && <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>{activeFile.previewError ? 'Candidate analysis requires a readable local preview.' : candidates.length ? level === 1 ? 'Level 1 is 0% obfuscation. Increase the level to include priority 2 and above.' : `No candidates at priorities 2–${level}; increase the level to include less-sensitive terms.` : 'No candidates found in supported editable text.'}</p>}
                 </div>
-                {proposals.length > 0 && <div className="candidate-subsection"><div className="candidate-subhead">Similarity proposals · confirm before grouping</div>{proposals.slice(0, 50).map((proposal) => <div className="proposal-row" key={proposal.id}><div><strong>{candidatesById[proposal.sourceId].term} ↔ {candidatesById[proposal.targetId].term}</strong><span>{proposal.reason}</span></div><button className="small-btn" onClick={() => applyCandidateGroupOperation('add', [proposal.sourceId, proposal.targetId])}>Confirm group</button></div>)}</div>}
                 {candidateGroups.length > 0 && <div className="candidate-subsection"><div className="candidate-subhead">Confirmed groups</div>{candidateGroups.map((group) => <div className="confirmed-group" key={group.id}><label><input type="checkbox" checked={mergeGroupIds.includes(group.id)} onChange={(event) => setMergeGroupIds((current) => event.target.checked ? [...current, group.id] : current.filter((id) => id !== group.id))} /> Merge group</label>{group.candidateIds.map((candidateId) => <div className="confirmed-member" key={candidateId}><span>{candidatesById[candidateId]?.term || 'Candidate'}</span><div>{group.candidateIds.length > 1 && <button className="small-btn" onClick={() => applyCandidateGroupOperation('split', [candidateId], group.id)}>Split out</button>}<button className="small-btn" onClick={() => applyCandidateGroupOperation('remove', [candidateId], group.id)}>Remove</button></div></div>)}</div>)}<button className="small-btn" disabled={mergeGroupIds.length < 2} onClick={() => applyCandidateGroupOperation('merge', [], undefined, mergeGroupIds)}>Merge selected groups</button></div>}
               </section> : <section className="panel"><div className="panel-head"><span className="panel-title">{activeFile.isProjectDocument ? 'Exported version' : 'Suggested groups'}</span><span className="panel-meta">{activeFile.isProjectDocument ? 'Read only' : `${visibleGroups.length} groups`}</span></div><div className="graph-list">{activeFile.isProjectDocument ? <><p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>This obfuscated version is read-only. Select Original above to review or adjust its candidate decisions.</p><button className="small-btn" type="button" onClick={() => downloadProjectVersion(activeVersion.id, activeVersion.name)}>Download this version</button><label className="dense-toggle"><input type="checkbox" checked={denseText} onChange={(event) => setDenseText(event.target.checked)} /> Dense text view</label>{previewSections.length > 1 && <div className="preview-navigation" role="group" aria-label="Preview section navigation" aria-describedby="preview-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}><span className="sr-only" id="preview-navigation-help">Use Left or Right Arrow to move between sections, or Home and End to jump to the first and last sections.</span><button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex - 1)} disabled={sectionIndex <= 0} aria-label="Previous preview section">Previous</button><span aria-live="polite"><strong>Section {sectionIndex + 1} of {previewSections.length}</strong><small>{activeSection?.label}</small></span><button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex + 1)} disabled={sectionIndex >= previewSections.length - 1} aria-label="Next preview section">Next</button></div>}</> : visibleGroups.length ? visibleGroups.map((group) => <div key={group.id} className={`graph-card ${selectedGroup === group.id ? 'selected' : ''}`} onClick={() => setSelectedGroup(group.id)}><div className="graph-card-head"><span className="graph-term">{group.term}</span><span className="confidence">{group.confidence} match</span></div><p className="graph-reason">{group.reason}</p><div className="member-row">{group.members.map((member, index) => <span key={member} className={`member ${confirmed[group.id] || (index === 0 && group.id === 'alex') ? 'confirmed' : ''}`}>{member} · {countMatches(activeText, member)}</span>)}</div><div className="graph-actions"><button className="small-btn primary" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'included'); }}>{decisions[group.id] === 'included' ? 'Included' : 'Include group'}</button><button className="small-btn" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'excluded'); }}>Exclude</button></div></div>) : <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>No detected groups at this level.</p>}</div></section>}
               {activeFile.isProjectDocument && <section className="panel coverage-panel" aria-labelledby="coverage-title">

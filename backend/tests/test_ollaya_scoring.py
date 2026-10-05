@@ -19,7 +19,7 @@ from backend.app.ollaya_scoring import (
 from backend.app.projects import ProjectService
 
 
-def test_input_builder_includes_only_bounded_occurrence_context_and_extraction_facts():
+def test_input_builder_sends_only_one_short_occurrence_context():
     text = "Opening sentence. Project Falcon starts on Monday. Unrelated private appendix text."
     candidate = {
         "id": "project",
@@ -30,20 +30,12 @@ def test_input_builder_includes_only_bounded_occurrence_context_and_extraction_f
         "occurrences": [{"location": "text", "start": text.index("Project Falcon"), "end": text.index("Project Falcon") + len("Project Falcon")}],
         "nerLabels": [],
     }
-    nearby = {
-        "id": "date",
-        "category": "DATE",
-        "occurrences": [{"location": "text", "start": text.index("Monday"), "end": text.index("Monday") + len("Monday")}],
-    }
+    features = build_ollaya_scoring_input(candidate, [CandidateBlock("text", text)])
 
-    features = build_ollaya_scoring_input(candidate, [CandidateBlock("text", text)], [candidate, nearby])
-
-    assert features["schemaVersion"] == "blot_ollaya_input_v1"
+    assert set(features) == {"candidate", "context"}
     assert features["candidate"] == "Project Falcon"
-    assert features["occurrenceCount"] == 1
-    assert features["nearbyEntityTypes"] == ["date"]
-    assert len("".join(features["contextSnippets"])) <= 512
-    assert all("Unrelated private appendix" not in snippet for snippet in features["contextSnippets"])
+    assert len(features["context"]) <= 192
+    assert "Unrelated private appendix" not in features["context"]
 
 
 def test_confidence_priority_boundaries_follow_scoring_plan():
@@ -137,14 +129,14 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
 
     with caplog.at_level(logging.INFO, logger="backend.app.ollaya_scoring"):
         result = LocalOllayaScorer(executable="/usr/local/bin/ollaya", run=fake_run).score_candidate(
-            {"candidate": "Private Project", "contextSnippets": ["Private context phrase"]}
+            {"candidate": "Private Project", "context": "Private context phrase"}
         )
 
     assert captured["command"][:3] == ["/usr/local/bin/ollaya", "run", "von:1.1"]
     assert "Private Project" not in " ".join(captured["command"])
     assert json.loads(captured["input"]) == {
         "candidate": "Private Project",
-        "contextSnippets": ["Private context phrase"],
+        "context": "Private context phrase",
     }
     assert result["redactionConfidence"] == 0.7
     assert captured["timeout"] == 60
@@ -158,7 +150,7 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
     assert "\n" not in log_line
     assert log_entry["request"]["state"] == {
         "candidate": "Private Project",
-        "contextSnippets": ["Private context phrase"],
+        "context": "Private context phrase",
     }
     assert log_entry["response"]["model"] == "von:1.1"
     assert log_entry["response"]["answers"]["is_identifier"]["choice"] == "Yes"
@@ -233,4 +225,4 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
     assert [match["term"] for match in preview["matches"]] == ["Alex Tan"]
     encrypted_state = (project_dir / ".blot" / "private-state.enc").read_bytes()
     assert b"Alex Tan met Jordan Lee on Monday" not in encrypted_state
-    assert b"contextSnippets" not in encrypted_state
+    assert b'"context"' not in encrypted_state

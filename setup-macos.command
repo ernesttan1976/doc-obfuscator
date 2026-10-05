@@ -12,7 +12,7 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
-uv sync --inexact --extra dev --extra minilm-macos
+uv sync --inexact --extra dev
 npm ci
 npm run build
 printf '%s\n' 'Blot setup is complete. Open launch-macos.command to start the local app.'

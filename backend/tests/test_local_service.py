@@ -154,26 +154,6 @@ async def test_ner_model_status_is_private_and_download_requires_explicit_confir
 
 
 @pytest.mark.anyio
-async def test_minilm_model_status_is_private_and_download_requires_explicit_confirmation(tmp_path):
-    app, client_context = local_client(tmp_path)
-    async with client_context as client:
-        denied = await client.get("/api/models/minilm/status")
-        headers = {"X-Local-App-Token": app.state.local_token}
-        status_response = await client.get("/api/models/minilm/status", headers=headers)
-        unconfirmed = await client.post("/api/models/minilm/download", json={}, headers=headers)
-
-    assert denied.status_code == 401
-    assert status_response.status_code == 200
-    assert status_response.json()["status"] == "idle"
-    assert status_response.json()["modelId"] == "sentence-transformers/all-MiniLM-L6-v2"
-    assert status_response.json()["revision"] == "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
-    assert status_response.json()["license"] == "Apache-2.0"
-    assert status_response.json()["installed"] is False
-    assert unconfirmed.status_code == 400
-    assert not (tmp_path / "models").exists()
-
-
-@pytest.mark.anyio
 async def test_untrusted_origin_is_rejected(tmp_path):
     _, client_context = local_client(tmp_path)
     async with client_context as client:
@@ -591,11 +571,8 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
     assert analysis.json()["nerCandidateCount"] == 0
     assert analysis.json()["nerTruncated"] is False
     assert analysis.json()["nerWarning"] is None
-    assert analysis.json()["similarityProposalCount"] == 0
-    assert analysis.json()["similarityWarning"] is None
     assert analysis.json()["groups"] == []
-    assert analysis.json()["proposals"]
-    assert all(proposal["confirmed"] is False for proposal in analysis.json()["proposals"])
+    assert all("proposal" not in key.lower() for key in analysis.json())
     assert manual["decision"] == "included"
     assert manual["pinned"] is True
     assert decision.status_code == 200

@@ -24,7 +24,6 @@ from .candidate_engine import (
     analyze_candidates,
     blocks_for_document,
     decide_candidate,
-    merge_proposals,
 )
 from .document_adapters import (
     PLACEHOLDER_LIKE_TEXT,
@@ -36,7 +35,6 @@ from .key_store import KeyStoreUnavailable, ProjectKeyStore
 from .local_crypto import atomic_write_private, decrypt_state, encrypt_state
 from .model_manager import ModelManagerError
 from .ollaya_scoring import (
-    CandidateOccurrenceIndex,
     LocalOllayaScorer,
     OllayaScoringError,
     build_ollaya_scoring_input,
@@ -107,14 +105,10 @@ class ProjectService:
         self,
         key_store: ProjectKeyStore,
         entity_extractor: Callable[[tuple[CandidateBlock, ...]], tuple[list[dict[str, object]], bool]] | None = None,
-        contextual_proposer: Callable[
-            [tuple[CandidateBlock, ...], list[dict[str, object]]], list[dict[str, object]]
-        ] | None = None,
         ollaya_scorer: LocalOllayaScorer | None = None,
     ) -> None:
         self.key_store = key_store
         self.entity_extractor = entity_extractor
-        self.contextual_proposer = contextual_proposer
         self.ollaya_scorer = ollaya_scorer
         self._export_plans: dict[str, dict[str, Any]] = {}
         self._export_lock = threading.RLock()
@@ -1027,7 +1021,7 @@ class ProjectService:
                 ner_warning = "The local NER model could not run; deterministic candidate discovery continued."
             yield from ner_entities
 
-        candidates, proposals = analyze_candidates(
+        candidates = analyze_candidates(
             blocks,
             document_id,
             version_id,
@@ -1039,14 +1033,11 @@ class ProjectService:
         ollaya_failures = 0
         ollaya_scored_count = 0
         if self.ollaya_scorer is not None:
-            occurrence_index = CandidateOccurrenceIndex(candidates)
             for candidate in candidates:
                 try:
                     features = build_ollaya_scoring_input(
                         candidate,
                         blocks,
-                        candidates,
-                        occurrence_index=occurrence_index,
                     )
                     candidate.update(self.ollaya_scorer.score_candidate(features))
                     if candidate.get("scoreStatus") in {"complete", "partial"}:
@@ -1063,38 +1054,26 @@ class ProjectService:
             ollaya_failures = len(candidates)
             for candidate in candidates:
                 candidate.update(unavailable_score())
-        similarity_warning = None
-        contextual_proposals = []
-        try:
-            if self.contextual_proposer:
-                contextual_proposals = self.contextual_proposer(blocks, candidates)
-        except ModelManagerError:
-            similarity_warning = "The local MiniLM model could not run; RapidFuzz proposals remain available."
-        proposals = merge_proposals(proposals, contextual_proposals)
         old_ids = {node["id"] for node in existing_nodes}
         graph["nodes"] = [node for node in nodes if node.get("id") not in old_ids] + candidates
         graph["edges"] = [
             edge for edge in edges
             if edge.get("sourceId") not in old_ids and edge.get("targetId") not in old_ids
-        ] + proposals
+        ]
         self.save_private_state(root, state)
         groups = graph.setdefault("groups", [])
         return {
             "documentId": document_id,
             "versionId": version_id,
             "candidates": candidates,
-            "proposals": proposals,
             "groups": [
                 group for group in groups
                 if group.get("documentId") == document_id and group.get("versionId") == version_id
             ],
             "candidateLimitReached": len(candidates) >= 1_000,
-            "proposalLimitReached": len(proposals) >= 1_000,
             "nerTruncated": ner_truncated,
             "nerCandidateCount": sum(node.get("source") == "ner" for node in candidates),
             "nerWarning": ner_warning,
-            "similarityProposalCount": sum("minilm" in proposal.get("scores", {}) for proposal in proposals),
-            "similarityWarning": similarity_warning,
             "ollayaStatus": (
                 "unavailable" if candidates and ollaya_scored_count == 0
                 else "partial" if ollaya_failures

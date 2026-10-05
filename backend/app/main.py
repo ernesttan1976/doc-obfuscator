@@ -38,7 +38,6 @@ from .model_manager import LocalModelManager, ModelManagerError
 from .ollaya_scoring import LocalOllayaScorer
 from .page_preview import PagePreviewError
 from .projects import ProjectError, ProjectService
-from .similarity_manager import LocalSimilarityManager
 
 logger = logging.getLogger(__name__)
 
@@ -200,14 +199,12 @@ def create_app(
     app.state.session_idle_timeout_seconds = 15 * 60
     app.state.active_project_directory = None
     app.state.model_manager = LocalModelManager(models_directory)
-    app.state.similarity_manager = LocalSimilarityManager(models_directory)
     app.state.ollaya_scorer = ollaya_scorer or LocalOllayaScorer()
     app.state.project_service = (
         ProjectService(
             key_store,
             app.state.model_manager.extract_entities,
-            app.state.similarity_manager.propose,
-            app.state.ollaya_scorer,
+            ollaya_scorer=app.state.ollaya_scorer,
         )
         if key_store is not None
         else None
@@ -308,35 +305,16 @@ def create_app(
         except ModelManagerError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.get("/api/models/minilm/status")
-    def minilm_model_status() -> dict[str, object]:
-        return app.state.similarity_manager.status()
-
     @app.get("/api/models/ollaya/status")
     def ollaya_model_status() -> dict[str, object]:
         return app.state.ollaya_scorer.status()
-
-    @app.post("/api/models/minilm/download")
-    def download_minilm_model(payload: ModelDownloadRequest) -> dict[str, object]:
-        try:
-            return app.state.similarity_manager.start_download(payload.confirmed)
-        except ModelManagerError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.delete("/api/models/minilm/download")
-    def cancel_minilm_model_download() -> dict[str, object]:
-        try:
-            return app.state.similarity_manager.cancel_download()
-        except ModelManagerError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     def project_service() -> ProjectService:
         if app.state.project_service is None:
             app.state.project_service = ProjectService(
                 OSKeyringProjectKeyStore(),
                 app.state.model_manager.extract_entities,
-                app.state.similarity_manager.propose,
-                app.state.ollaya_scorer,
+                ollaya_scorer=app.state.ollaya_scorer,
             )
         return app.state.project_service
 

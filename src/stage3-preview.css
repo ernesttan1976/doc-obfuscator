@@ -132,8 +132,7 @@
 }
 
 .manual-candidate-form > div,
-.confirmed-member,
-.proposal-row {
+.confirmed-member {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -175,37 +174,35 @@
   border-top: 1px solid var(--border-soft);
 }
 
-.proposal-row,
 .confirmed-group {
   padding: 9px 0;
   border-top: 1px solid var(--border-soft);
 }
 
-.proposal-row {
-  justify-content: space-between;
-}
-
-.proposal-row > div {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-
-.proposal-row strong,
 .confirmed-member > span {
   overflow-wrap: anywhere;
   font-size: 12px;
 }
 
-.proposal-row span {
+.confirmed-member .small-btn {
+  flex: 0 0 auto;
+  padding: 0 7px;
+}
+
+.candidate-group-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 7px;
   color: var(--muted);
   font-size: 10px;
 }
 
-.proposal-row .small-btn,
-.confirmed-member .small-btn {
-  flex: 0 0 auto;
-  padding: 0 7px;
+.candidate-subsection > p {
+  margin: 5px 0 9px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .confirmed-group > label {

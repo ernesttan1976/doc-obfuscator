@@ -12,7 +12,6 @@ dependencies = [
   "defusedxml>=0.7.1,<0.8",
   "fastapi==0.142.2",
   "keyring>=25,<27",
-  "rapidfuzz==3.14.3",
   "uvicorn==0.54.0",
 ]
 
@@ -23,13 +22,6 @@ dev = [
 ]
 models = [
   "gliner==0.2.29",
-]
-minilm-macos = [
-  "mlx-embeddings==0.1.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
-]
-minilm-windows = [
-  "torch>=2.6,<3; sys_platform == 'win32'",
-  "transformers>=5,<6; sys_platform == 'win32'",
 ]
 
 [tool.setuptools.packages.find]
