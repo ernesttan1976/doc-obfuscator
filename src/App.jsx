@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { getCandidateDecisionCounts, getCandidatesNotSelectedAtLevel, getVisibleCandidates, isCandidateAutoSuggested } from './candidate-review.js';
+import { getCandidateDecisionCounts, getCandidatesNotSelectedAtLevel, getVisibleCandidates, isCandidateAutoSuggested, upsertCandidate } from './candidate-review.js';
 import { findPageTermMatches, mapClientPointToLayer, mapClientRectToLayer } from './page-highlights.js';
 import './stage3-preview.css';
 
@@ -178,7 +178,9 @@ export default function App() {
       .filter((candidate) => candidate.level >= 2 && candidate.level <= level && isCandidateAutoSuggested(candidate))
       .reduce((sum, candidate) => sum + candidate.occurrenceCount, 0)
     : changeRows.reduce((sum, row) => sum + (row.decision === 'excluded' ? 0 : row.occurrences), 0);
-  const visibleCandidates = reviewableProjectDocument ? getVisibleCandidates(candidates, level) : [];
+  const visibleCandidates = reviewableProjectDocument
+    ? activeFile.candidateLoading ? candidates : getVisibleCandidates(candidates, level)
+    : [];
   const candidatesById = Object.fromEntries(candidates.map((candidate) => [candidate.id, candidate]));
   const candidateGroups = activeFile.candidateGroups || [];
   const proposals = (activeFile.proposals || []).filter((proposal) => (
@@ -421,7 +423,7 @@ export default function App() {
         return found;
       });
       const fullText = nodes.map((node) => node.textContent).join('');
-      const terms = reviewableProjectDocument
+      const terms = reviewableProjectDocument && !activeFile.candidateLoading
         ? getVisibleCandidates(activeFile.candidates || [], level).filter((candidate) => (
           isCandidateAutoSuggested(candidate) || candidate.decision === 'excluded'
         ))
@@ -607,7 +609,7 @@ export default function App() {
   };
 
   const renderParagraph = (paragraph) => {
-    const terms = (reviewableProjectDocument
+    const terms = (reviewableProjectDocument && !activeFile.candidateLoading
       ? visibleCandidates.map((candidate) => ({ member: candidate.term, candidate }))
       : activeFile.isProjectDocument
         ? []
@@ -643,35 +645,77 @@ export default function App() {
     if (!directory || !localToken) return false;
     setExportPreview(null);
     setFiles((current) => current.map((file) => (
-      file.id === documentId ? { ...file, candidateLoading: true, candidateError: '' } : file
+      file.id === documentId
+        ? { ...file, candidates: [], proposals: [], candidateLoading: true, candidateProgress: 0, candidateError: '' }
+        : file
     )));
     try {
-      const response = await fetch('/api/projects/document-candidates', {
+      const response = await fetch('/api/projects/document-candidates/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
         body: JSON.stringify({ directory, document_id: documentId, manual_terms: manualTerms }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Could not analyze supported text');
-      setFiles((current) => current.map((file) => (
-        file.id === documentId
-          ? {
-            ...file,
-            candidates: data.candidates,
-            proposals: data.proposals,
-            candidateGroups: data.groups,
-            candidateLimitReached: data.candidateLimitReached || data.proposalLimitReached,
-            nerTruncated: data.nerTruncated || false,
-            nerCandidateCount: data.nerCandidateCount || 0,
-            nerWarning: data.nerWarning || '',
-            similarityWarning: data.similarityWarning || '',
-            ollayaWarning: data.ollayaWarning || '',
-            candidateLoaded: true,
-            candidateLoading: false,
-            candidateError: '',
-          }
-          : file
-      )));
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Could not analyze supported text');
+      }
+      if (!response.body) throw new Error('This browser does not support streamed candidate analysis');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let completed = false;
+      const handleEvent = (line) => {
+        if (!line.trim()) return;
+        const event = JSON.parse(line);
+        if (event.type === 'candidate') {
+          setFiles((current) => current.map((file) => {
+            if (file.id !== documentId) return file;
+            const currentCandidates = file.candidates || [];
+            const isNew = !currentCandidates.some((candidate) => candidate.id === event.candidate.id);
+            return {
+              ...file,
+              candidates: upsertCandidate(currentCandidates, event.candidate),
+              candidateProgress: (file.candidateProgress || 0) + Number(isNew),
+            };
+          }));
+          return;
+        }
+        if (event.type === 'error') throw new Error(event.detail || 'Could not analyze supported text');
+        if (event.type !== 'complete') return;
+        const { data } = event;
+        setFiles((current) => current.map((file) => (
+          file.id === documentId
+            ? {
+              ...file,
+              candidates: data.candidates,
+              proposals: data.proposals,
+              candidateGroups: data.groups,
+              candidateLimitReached: data.candidateLimitReached || data.proposalLimitReached,
+              nerTruncated: data.nerTruncated || false,
+              nerCandidateCount: data.nerCandidateCount || 0,
+              nerWarning: data.nerWarning || '',
+              similarityWarning: data.similarityWarning || '',
+              ollayaWarning: data.ollayaWarning || '',
+              candidateLoaded: true,
+              candidateLoading: false,
+              candidateError: '',
+            }
+            : file
+        )));
+        completed = true;
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        lines.forEach(handleEvent);
+        if (done) break;
+      }
+      if (buffer.trim()) handleEvent(buffer);
+      if (!completed) throw new Error('Candidate analysis ended before it was complete');
       return true;
     } catch (error) {
       setFiles((current) => current.map((file) => (
@@ -1643,7 +1687,7 @@ export default function App() {
                   <span><strong>{proposals.length}</strong> proposals not in a group</span>
                 </div>
                 <div className="graph-list">
-                  {activeFile.candidateLoading && <p role="status">Scanning supported text locally…</p>}
+                  {activeFile.candidateLoading && <p role="status">{activeFile.candidateProgress ? `Scanning supported text locally… ${activeFile.candidateProgress} candidate words found.` : 'Scanning supported text locally…'}</p>}
                   {activeFile.candidateError && <p className="candidate-error" role="alert">{activeFile.candidateError} <button className="small-btn" onClick={() => loadProjectDocumentCandidates(activeFile.id)}>Retry</button></p>}
                   {activeFile.candidateLimitReached && <p className="candidate-limit">Candidate or proposal list reached its display limit.</p>}
                   {activeFile.nerTruncated && <p className="candidate-limit" role="status">The local NER scan was capped at 250,000 supported-text characters; some text was not analyzed by the model.</p>}
@@ -1656,8 +1700,8 @@ export default function App() {
                     {candidate.signals && <p className="candidate-location">Ollaya {candidate.scoringModel || 'fallback'} · identifier: {candidate.signals.isIdentifier ? `${candidate.signals.isIdentifier.answer} (${Math.round(candidate.signals.isIdentifier.probabilityYes * 100)}% yes)` : 'unavailable'} · operational significance: {candidate.signals.hasOperationalSignificance ? `${candidate.signals.hasOperationalSignificance.answer} (${Math.round(candidate.signals.hasOperationalSignificance.probabilityYes * 100)}% yes)` : 'unavailable'}{candidate.reasons?.length ? ` · ${candidate.reasons.join('; ')}` : ''}</p>}
                     {candidate.occurrences[0] && <p className="candidate-location">{candidate.occurrences[0].location}{candidate.occurrencesTruncated ? ' · locations truncated' : ''}</p>}
                     <div className="graph-actions">
-                      <button className={`small-btn ${candidate.decision === 'included' ? 'primary' : ''}`} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'included' ? 'suggested' : 'included')}>{candidate.decision === 'included' ? 'Included' : 'Include'}</button>
-                      <button className={`small-btn ${candidate.decision === 'excluded' ? 'selected' : ''}`} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'excluded' ? 'suggested' : 'excluded')}>{candidate.decision === 'excluded' ? 'Excluded' : 'Exclude'}</button>
+                      <button className={`small-btn ${candidate.decision === 'included' ? 'primary' : ''}`} disabled={activeFile.candidateLoading} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'included' ? 'suggested' : 'included')}>{candidate.decision === 'included' ? 'Included' : 'Include'}</button>
+                      <button className={`small-btn ${candidate.decision === 'excluded' ? 'selected' : ''}`} disabled={activeFile.candidateLoading} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'excluded' ? 'suggested' : 'excluded')}>{candidate.decision === 'excluded' ? 'Excluded' : 'Exclude'}</button>
                     </div>
                   </div>)}
                   {!activeFile.candidateLoading && !activeFile.candidateError && visibleCandidates.length === 0 && <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>{activeFile.previewError ? 'Candidate analysis requires a readable local preview.' : candidates.length ? level === 1 ? 'Level 1 is 0% obfuscation. Increase the level to include priority 2 and above.' : `No candidates at priorities 2–${level}; increase the level to include less-sensitive terms.` : 'No candidates found in supported editable text.'}</p>}

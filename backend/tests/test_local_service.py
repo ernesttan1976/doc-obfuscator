@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import secrets
@@ -509,6 +510,20 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
         )
         candidates = analysis.json()["candidates"]
         email = next(candidate for candidate in candidates if candidate["term"] == "alex@example.test")
+        streamed = await client.post(
+            "/api/projects/document-candidates/stream",
+            json=request,
+            headers=headers,
+        )
+        events = [json.loads(line) for line in streamed.text.splitlines()]
+        streamed_candidates = [event["candidate"] for event in events if event["type"] == "candidate"]
+        assert streamed.status_code == 200
+        assert streamed.headers["content-type"].startswith("application/x-ndjson")
+        assert streamed_candidates
+        assert events[-1]["type"] == "complete"
+        assert {candidate["term"] for candidate in streamed_candidates} <= {
+            candidate["term"] for candidate in events[-1]["data"]["candidates"]
+        }
         decision = await client.post(
             "/api/projects/candidate-decision",
             json={**request, "candidate_id": email["id"], "decision": "excluded"},

@@ -114,6 +114,7 @@ def analyze_candidates(
     existing_nodes: Iterable[dict[str, object]] = (),
     manual_terms: Iterable[str] = (),
     ner_entities: Iterable[dict[str, object]] = (),
+    on_candidate: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Extract conservative local candidates and unconfirmed fuzzy proposals."""
     blocks = tuple(blocks)
@@ -124,6 +125,38 @@ def analyze_candidates(
     }
     collected: dict[str, dict[str, object]] = {}
     category_counts: dict[str, int] = {}
+
+    def report_candidate(discovered: dict[str, object]) -> None:
+        if on_candidate is None:
+            return
+        term = str(discovered["term"])
+        category = str(discovered["category"])
+        source = str(discovered["source"])
+        location = str(discovered["location"])
+        start = int(discovered["start"])
+        end = int(discovered["end"])
+        normalized_term = " ".join(term.split()).casefold()
+        level = _priority_level(category, set(discovered["nerLabels"]), float(discovered["nerScore"]))
+        on_candidate(
+            {
+                "id": _candidate_id(version_id, normalized_term),
+                "documentId": document_id,
+                "versionId": version_id,
+                "term": term,
+                "category": category,
+                "level": level,
+                "source": source,
+                "nerLabels": discovered["nerLabels"],
+                "nerScore": discovered["nerScore"],
+                "occurrences": [{"location": location, "start": start, "end": end}],
+                "occurrenceCount": discovered["occurrenceCount"],
+                "occurrencesTruncated": False,
+                "decision": "included" if source == "manual" else "suggested",
+                "pinned": source == "manual",
+                "scoreStatus": "scanning",
+            }
+        )
+
     for block in blocks:
         for category, pattern in (
             ("EMAIL", _EMAIL),
@@ -148,6 +181,7 @@ def analyze_candidates(
                     block.location,
                     match.start(),
                     match.end(),
+                    on_candidate=report_candidate,
                 )
         for start, end in _capitalized_phrase_matches(block.text):
             _add_occurrence(
@@ -158,6 +192,7 @@ def analyze_candidates(
                 block.location,
                 start,
                 end,
+                on_candidate=report_candidate,
             )
 
     block_text_by_location = {block.location: block.text for block in blocks}
@@ -190,6 +225,7 @@ def analyze_candidates(
             source="ner",
             ner_label=label,
             ner_score=float(score),
+            on_candidate=report_candidate,
         )
 
     for term in manual_terms:
@@ -208,6 +244,7 @@ def analyze_candidates(
                     block.location,
                     match.start(),
                     match.end(),
+                    on_candidate=report_candidate,
                 )
         if not found:
             raise CandidateError("The selected phrase is not present in supported text for this version.")
@@ -541,11 +578,15 @@ def _add_occurrence(
     source: str = "pattern",
     ner_label: str | None = None,
     ner_score: float = 0.0,
+    on_candidate: Callable[[dict[str, object]], None] | None = None,
 ) -> None:
     normalized = " ".join(term.split()).casefold()
     if not normalized:
         return
     current = collected.get(normalized)
+    is_new = current is None
+    previous_category = str(current["category"]) if current is not None else category
+    had_source = source in current["sources"] if current is not None else False
     if current is None:
         if category_counts.get(category, 0) >= MAX_CANDIDATES_PER_CATEGORY and category != "MANUAL":
             return
@@ -583,6 +624,22 @@ def _add_occurrence(
     current["occurrenceCount"] = int(current["occurrenceCount"]) + 1
     if len(occurrences) < MAX_OCCURRENCES_PER_CANDIDATE:
         occurrences.append(occurrence)
+    if on_candidate is not None and (is_new or previous_category != str(current["category"]) or not had_source):
+        on_candidate(
+            {
+                "term": str(current["term"]),
+                "category": str(current["category"]),
+                "source": (
+                    "manual" if current["manual"] else "ner" if "ner" in sources else "pattern"
+                ),
+                "location": location,
+                "start": start,
+                "end": end,
+                "nerLabels": sorted(ner_labels),
+                "nerScore": current["nerScore"],
+                "occurrenceCount": current["occurrenceCount"],
+            }
+        )
 
 
 def _category_priority(category: str) -> int:

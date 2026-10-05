@@ -58,6 +58,20 @@ def test_pattern_candidates_use_spread_priorities_occurrences_and_unconfirmed_pr
     assert repeated_proposals == proposals
 
 
+def test_candidate_discovery_callback_emits_words_as_the_scan_finds_them():
+    discovered = []
+    candidates, _ = analyze_candidates(
+        [CandidateBlock("text", "Alex Tan can be reached at alex@example.test.")],
+        "doc-1",
+        "version-1",
+        on_candidate=discovered.append,
+    )
+
+    assert {candidate["term"] for candidate in discovered} >= {"Alex Tan", "alex@example.test"}
+    assert all(candidate["scoreStatus"] == "scanning" for candidate in discovered)
+    assert {candidate["id"] for candidate in discovered} <= {candidate["id"] for candidate in candidates}
+
+
 def test_manual_phrase_is_included_and_pinned_and_decisions_survive_analysis():
     blocks = [CandidateBlock("text", "Project Cedar; project cedar remains internal.")]
     candidates, _ = analyze_candidates(blocks, "doc-1", "version-1", manual_terms=["Project Cedar"])

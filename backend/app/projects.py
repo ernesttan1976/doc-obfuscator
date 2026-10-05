@@ -997,6 +997,7 @@ class ProjectService:
         directory: str | Path,
         document_id: str,
         manual_terms: list[str] | None = None,
+        on_candidate: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, object]:
         root = self._validate_directory(directory)
         parsed, version_id = self._read_original_document(root, document_id)
@@ -1013,18 +1014,27 @@ class ProjectService:
         ]
         blocks = blocks_for_document(parsed)
         ner_warning = None
-        try:
-            ner_entities, ner_truncated = self.entity_extractor(blocks) if self.entity_extractor else ([], False)
-        except ModelManagerError:
-            ner_entities, ner_truncated = [], False
-            ner_warning = "The local NER model could not run; deterministic candidate discovery continued."
+        ner_truncated = False
+
+        def iter_ner_entities():
+            nonlocal ner_warning, ner_truncated
+            try:
+                ner_entities, ner_truncated = (
+                    self.entity_extractor(blocks) if self.entity_extractor else ([], False)
+                )
+            except ModelManagerError:
+                ner_entities = []
+                ner_warning = "The local NER model could not run; deterministic candidate discovery continued."
+            yield from ner_entities
+
         candidates, proposals = analyze_candidates(
             blocks,
             document_id,
             version_id,
             existing_nodes,
             [*retained_manual_terms, *(manual_terms or [])],
-            ner_entities=ner_entities,
+            ner_entities=iter_ner_entities(),
+            on_candidate=on_candidate,
         )
         ollaya_failures = 0
         ollaya_scored_count = 0

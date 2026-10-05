@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import ipaddress
+import json
 import logging
 import os
 import secrets
@@ -13,7 +15,13 @@ from urllib.parse import urlsplit
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -31,6 +39,8 @@ from .ollaya_scoring import LocalOllayaScorer
 from .page_preview import PagePreviewError
 from .projects import ProjectError, ProjectService
 from .similarity_manager import LocalSimilarityManager
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = PROJECT_ROOT / "dist"
@@ -549,6 +559,45 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except (CandidateError, ProjectError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/projects/document-candidates/stream")
+    async def stream_project_document_candidates(payload: AnalyzeCandidatesRequest) -> StreamingResponse:
+        events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def publish(event: dict[str, object]) -> None:
+            loop.call_soon_threadsafe(events.put_nowait, event)
+
+        def analyze() -> None:
+            try:
+                result = project_service().analyze_document_candidates(
+                    payload.directory,
+                    payload.document_id,
+                    payload.manual_terms,
+                    on_candidate=lambda candidate: publish({"type": "candidate", "candidate": candidate}),
+                )
+            except (KeyStoreUnavailable, DocumentAdapterError, CandidateError, ProjectError) as exc:
+                publish({"type": "error", "detail": str(exc)})
+            except Exception:
+                logger.exception("Streaming document candidate analysis failed")
+                publish({"type": "error", "detail": "Could not analyze supported text."})
+            else:
+                publish({"type": "complete", "data": result})
+
+        async def event_stream():
+            worker = asyncio.create_task(asyncio.to_thread(analyze))
+            while True:
+                event = await events.get()
+                yield f"{json.dumps(event, separators=(',', ':'))}\n"
+                if event["type"] in {"complete", "error"}:
+                    await worker
+                    break
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store, private", "X-Accel-Buffering": "no"},
+        )
 
     @app.post("/api/projects/candidate-decision")
     def update_project_candidate_decision(payload: CandidateDecisionRequest) -> dict[str, object]:

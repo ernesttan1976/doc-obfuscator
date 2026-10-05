@@ -6,6 +6,14 @@ export function getVisibleCandidates(candidates, level) {
   return [...scored, ...unscored];
 }
 
+export function upsertCandidate(candidates, candidate) {
+  const index = candidates.findIndex((item) => item.id === candidate.id);
+  if (index < 0) return [...candidates, candidate];
+  return candidates.map((item, itemIndex) => (
+    itemIndex === index ? { ...item, ...candidate } : item
+  ));
+}
+
 export function isCandidateAutoSuggested(candidate) {
   if (candidate.decision === 'excluded') return false;
   if (candidate.pinned) return candidate.decision === 'included';

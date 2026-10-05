@@ -5,6 +5,7 @@ import {
   getCandidateDecisionCounts,
   getCandidatesNotSelectedAtLevel,
   getVisibleCandidates,
+  upsertCandidate,
 } from './candidate-review.js';
 import { findPageTermMatches, mapClientPointToLayer, mapClientRectToLayer } from './page-highlights.js';
 
@@ -45,6 +46,18 @@ test('candidates with Ollaya review priorities are ordered highest review priori
   assert.deepEqual(getVisibleCandidates(scored, 10).map(({ id }) => id), [
     'priority-ten', 'priority-six', 'priority-three', 'unscored',
   ]);
+});
+
+test('streamed candidates are appended as discovered and later updates preserve existing fields', () => {
+  const first = { id: 'first', term: 'Alex Tan', decision: 'suggested' };
+  const second = { id: 'second', term: 'alex@example.test' };
+  const initial = [first];
+  const appended = upsertCandidate(initial, second);
+  const updated = upsertCandidate(appended, { ...first, category: 'NER_ENTITY' });
+
+  assert.deepEqual(appended, [first, second]);
+  assert.deepEqual(updated, [{ ...first, category: 'NER_ENTITY' }, second]);
+  assert.deepEqual(initial, [first]);
 });
 
 test('review counts cover all candidates and do not change with the selected level', () => {
