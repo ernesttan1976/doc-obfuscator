@@ -156,6 +156,44 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
     assert log_entry["response"]["answers"]["is_identifier"]["choice"] == "Yes"
 
 
+def test_local_cli_caches_successful_scores_for_identical_inputs(caplog):
+    scoring_calls = []
+
+    def fake_run(command, **kwargs):
+        if command[-1] == "list":
+            return subprocess.CompletedProcess(command, 0, stdout="NAME\nvon:1.1 id 1GB now\n", stderr="")
+        scoring_calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({
+                "model": "von:1.1",
+                "answers": {
+                    "is_identifier": {
+                        "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.8, "No": 0.2}
+                    },
+                    "has_operational_significance": {
+                        "type": "choice", "choice": "No", "probabilities": {"Yes": 0.2, "No": 0.8}
+                    },
+                },
+            }),
+            stderr="",
+        )
+
+    scorer = LocalOllayaScorer(executable="/usr/local/bin/ollaya", run=fake_run)
+    features = {"candidate": "Private Project", "context": "A short private context."}
+    with caplog.at_level(logging.INFO, logger="backend.app.ollaya_scoring"):
+        first = scorer.score_candidate(features)
+        first["signals"]["isIdentifier"]["answer"] = "No"
+        second = scorer.score_candidate({"context": features["context"], "candidate": features["candidate"]})
+        scorer.score_candidate({**features, "context": "A different context."})
+
+    assert len(scoring_calls) == 2
+    assert second["signals"]["isIdentifier"]["answer"] == "Yes"
+    records = [record for record in caplog.records if getattr(record, "ollaya_event", None) == "candidate_scoring_call"]
+    assert [record.ollaya_cache_hit for record in records] == [False, True, False]
+
+
 def test_local_cli_does_not_attempt_to_download_a_missing_model_and_logs_failed_attempt(caplog):
     calls = []
 

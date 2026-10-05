@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import re
 import shutil
 import subprocess
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
+from copy import deepcopy
 from typing import Any
 
 from .candidate_engine import CandidateBlock
@@ -17,6 +21,7 @@ SCORING_MODEL = "von:1.1"
 MAX_CONTEXT_CHARS = 192
 MAX_CONTEXT_WINDOW_CHARS = 192
 DEFAULT_TIMEOUT_SECONDS = 60
+MAX_SCORE_CACHE_ENTRIES = 2048
 
 _QUESTIONS = {
     "is_identifier": {
@@ -196,6 +201,9 @@ class LocalOllayaScorer:
         self.timeout_seconds = timeout_seconds
         self._run = run
         self._model_checked = False
+        self._score_cache: OrderedDict[str, tuple[Any, dict[str, Any]]] = OrderedDict()
+        self._score_cache_lock = threading.Lock()
+        self._score_inflight: dict[str, threading.Lock] = {}
 
     def status(self) -> dict[str, Any]:
         executable = self.executable or shutil.which("ollaya")
@@ -210,9 +218,9 @@ class LocalOllayaScorer:
         outcome = "unavailable"
         signal_count = 0
         response_for_log: Any = None
+        cache_hit = False
         try:
-            response_for_log = self._score_candidate(features)
-            result = score_result_from_signals(validate_ollaya_response(response_for_log))
+            response_for_log, result, cache_hit = self._score_candidate_cached(features)
             outcome = str(result.get("scoreStatus", "unavailable"))
             signals = result.get("signals")
             signal_count = len(signals) if isinstance(signals, dict) else 0
@@ -221,6 +229,7 @@ class LocalOllayaScorer:
             call_log = {
                 "event": "ollaya_call",
                 "model": self.model,
+                "cacheHit": cache_hit,
                 "outcome": outcome,
                 "durationMs": round((time.perf_counter() - started) * 1000, 1),
                 "validSignalCount": signal_count,
@@ -239,10 +248,43 @@ class LocalOllayaScorer:
                     "ollaya_event": "candidate_scoring_call",
                     "ollaya_model": self.model,
                     "ollaya_outcome": outcome,
+                    "ollaya_cache_hit": cache_hit,
                     "ollaya_duration_ms": round((time.perf_counter() - started) * 1000, 1),
                     "ollaya_signal_count": signal_count,
                 },
             )
+
+    def _score_candidate_cached(
+        self, features: dict[str, Any]
+    ) -> tuple[Any, dict[str, Any], bool]:
+        cache_key = _score_cache_key(self.model, features)
+        with self._score_cache_lock:
+            cached = self._score_cache.get(cache_key)
+            if cached is not None:
+                self._score_cache.move_to_end(cache_key)
+                return deepcopy(cached[0]), deepcopy(cached[1]), True
+            inflight_lock = self._score_inflight.setdefault(cache_key, threading.Lock())
+
+        try:
+            with inflight_lock:
+                with self._score_cache_lock:
+                    cached = self._score_cache.get(cache_key)
+                    if cached is not None:
+                        self._score_cache.move_to_end(cache_key)
+                        return deepcopy(cached[0]), deepcopy(cached[1]), True
+
+                response = self._score_candidate(features)
+                result = score_result_from_signals(validate_ollaya_response(response))
+                with self._score_cache_lock:
+                    self._score_cache[cache_key] = (deepcopy(response), deepcopy(result))
+                    self._score_cache.move_to_end(cache_key)
+                    while len(self._score_cache) > MAX_SCORE_CACHE_ENTRIES:
+                        self._score_cache.popitem(last=False)
+                return response, result, False
+        finally:
+            with self._score_cache_lock:
+                if self._score_inflight.get(cache_key) is inflight_lock:
+                    del self._score_inflight[cache_key]
 
     def _score_candidate(self, features: dict[str, Any]) -> Any:
         executable = self.executable or shutil.which("ollaya")
@@ -338,3 +380,18 @@ def _valid_probability(value: Any) -> bool:
         and math.isfinite(value)
         and 0.0 <= value <= 1.0
     )
+
+
+def _score_cache_key(model: str, features: dict[str, Any]) -> str:
+    request = json.dumps(
+        {
+            "method": SCORING_METHOD,
+            "model": model,
+            "questions": _QUESTIONS,
+            "state": features,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(request.encode("utf-8")).hexdigest()
