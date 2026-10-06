@@ -1,7 +1,8 @@
 # Iterative Prompt Evaluation Plan
 
-**Status:** Planning baseline; implementation has not started.  
-**Goal:** Improve Ollaya's word-level classifications by reviewing errors, revising the scoring prompt, and rerunning the same evaluation set.
+**Status:** Implemented as the interactive `backend.app.prompt_iteration` CLI and Python workflow.
+
+**Goal:** Improve Ollaya's word-level classifications by reviewing errors, revising the scoring prompt with OpenAI GPT-6 Luna, and rerunning the same evaluation set.
 
 ## Overview
 
@@ -17,7 +18,7 @@ Fixed source text
     → rerun the same inputs and compare
 ```
 
-The three signals are independent: a word can be both common and an identifier or operationally significant. Scores are percentages, not guarantees. Keep the source text and reviewed labels local; do not send document words or contexts to a hosted prompt-rewriting service.
+The three signals are independent: a word can be both common and an identifier or operationally significant. Scores are percentages, not guarantees. Ollaya scoring runs locally. When an error is reviewed, its word, bounded text context, predicted labels, and corrected labels are sent to the configured OpenAI model to revise the prompt.
 
 ## Stage 0 — Freeze the evaluation run
 
@@ -86,7 +87,7 @@ Give the prompt-revision model the current prompt, the reviewed misclassificatio
 4. Compare error counts/rates against `run001`, both overall and per signal. Keep the earlier run unchanged.
 5. If the new prompt does not improve the target error measure or causes a material regression for a signal, record that outcome and revise from the best-performing version rather than assuming the latest prompt is better.
 
-Prompt revision should run locally when using real document-derived words or contexts. A remote prompt-revision service may only be considered for synthetic examples or after an explicit privacy/product decision; do not transmit user document data implicitly.
+Prompt revision uses the OpenAI Responses API with `PROMPT_REVISER_MODEL` (default `gpt-6-luna`) and `OPENAI_API_KEY` loaded from the repository `.env`. Only reviewed error examples are sent for revision; the full source document and complete word set are not submitted in the revision request. Users should treat the reviewed contexts and labels as data shared with OpenAI.
 
 ## Iteration ledger and success criteria
 

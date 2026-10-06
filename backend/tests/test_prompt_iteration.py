@@ -1,5 +1,6 @@
 import csv
-import subprocess
+import json
+from io import BytesIO
 
 import pytest
 
@@ -8,7 +9,7 @@ from backend.app.prompt_iteration import (
     CSV_COLUMNS,
     PromptIterationError,
     _document_to_plain_text,
-    _revise_prompt_locally,
+    _revise_prompt_with_openai,
     iterate_prompt_for_file,
 )
 
@@ -137,20 +138,39 @@ def test_iterate_prompt_for_file_rejects_nonempty_output_directory(tmp_path):
         iterate_prompt_for_file(source, output_dir=output_dir, scorer=lambda *_args: {})
 
 
-def test_local_prompt_rewriter_ignores_remote_ollama_host(monkeypatch):
+def test_openai_prompt_rewriter_sends_reviewed_errors_to_configured_model(monkeypatch):
     captured = {}
 
-    def fake_run(command, **kwargs):
-        captured["command"] = command
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(command, 0, stdout="Revised prompt\n", stderr="")
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["authorization"] = request.get_header("Authorization")
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(request.data)
+        response = {
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "Revised prompt\n"}]}
+            ]
+        }
+        return BytesIO(json.dumps(response).encode("utf-8"))
 
-    monkeypatch.setenv("OLLAMA_HOST", "https://example.invalid")
-    monkeypatch.setattr("backend.app.prompt_iteration.shutil.which", lambda _name: "/usr/bin/ollama")
-    monkeypatch.setattr("backend.app.prompt_iteration.subprocess.run", fake_run)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
+    monkeypatch.setenv("PROMPT_REVISER_MODEL", "gpt-6-luna-test")
+    monkeypatch.setattr("backend.app.prompt_iteration.urllib.request.urlopen", fake_urlopen)
 
-    revised = _revise_prompt_locally("Current prompt", [], model="test-model")
+    errors = [{"word": "Falcon", "context": "Falcon launches at dawn", "incorrect_signals": ["is_identifier"]}]
+    revised = _revise_prompt_with_openai("Current prompt", errors, timeout_seconds=42)
 
     assert revised == "Revised prompt"
-    assert captured["command"] == ["/usr/bin/ollama", "run", "test-model"]
-    assert "OLLAMA_HOST" not in captured["env"]
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert captured["authorization"] == "Bearer test-api-key"
+    assert captured["timeout"] == 42
+    assert captured["body"]["model"] == "gpt-6-luna-test"
+    revision_input = json.loads(captured["body"]["input"])
+    assert revision_input == {"current_prompt": "Current prompt", "reviewed_errors": errors}
+
+
+def test_openai_prompt_rewriter_requires_api_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with pytest.raises(PromptIterationError, match="OPENAI_API_KEY"):
+        _revise_prompt_with_openai("Current prompt", [])

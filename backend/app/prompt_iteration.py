@@ -9,15 +9,21 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 from .candidate_engine import CandidateBlock, blocks_for_document
 from .document_adapters import ParsedDocument, parse_document
 from .ollaya_scoring import SCORING_MODEL, validate_ollaya_response
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 INITIAL_PROMPT = (
     "Classify each candidate word using its context. Answer all three questions "
@@ -69,6 +75,8 @@ SIGNAL_QUESTIONS = {
         "This is uncommon, invented, malformed, or not a common English word.",
     ),
 }
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+DEFAULT_PROMPT_REVISER_MODEL = "gpt-6-luna"
 
 
 class PromptIterationError(Exception):
@@ -291,45 +299,62 @@ def _collect_user_review(
         gold_labels[row["example_id"]] = labels
 
 
-def _revise_prompt_locally(
+def _revise_prompt_with_openai(
     current_prompt: str,
     errors: Sequence[dict[str, Any]],
     *,
     model: str | None = None,
     timeout_seconds: int = 180,
 ) -> str:
-    executable = shutil.which("ollama")
-    if not executable:
-        raise PromptIterationError(
-            "Prompt revision needs a local text-generation CLI. Install Ollama and pull a local "
-            "model, or pass a prompt_reviser callback. The word/context review stays local."
-        )
-    selected_model = model or os.environ.get("PROMPT_REVISER_MODEL", "llama3.2").strip()
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise PromptIterationError("Set OPENAI_API_KEY in the repository .env file to revise prompts with OpenAI.")
+    selected_model = (model or os.environ.get("PROMPT_REVISER_MODEL", "")).strip() or DEFAULT_PROMPT_REVISER_MODEL
     revision_request = {
-        "task": (
-            "Revise the scoring prompt to address these reviewed errors. Return only the revised "
-            "prompt text. Preserve the three independent signals and their meanings; do not "
-            "change the 50% decision threshold or infer labels from redaction decisions."
-        ),
         "current_prompt": current_prompt,
         "reviewed_errors": list(errors),
     }
+    request_body = {
+        "model": selected_model,
+        "instructions": (
+            "Improve the word-classification prompt based on the reviewed errors. Return only the revised "
+            "prompt text. Preserve the three independent signals (named-entity identification, operational "
+            "significance, and common-word status). Do not change the 50% decision threshold, modify any "
+            "corrected labels, or infer labels from redaction decisions. Make a focused change that addresses "
+            "the demonstrated error patterns."
+        ),
+        "input": json.dumps(revision_request, ensure_ascii=False),
+        "max_output_tokens": 2048,
+    }
+    request = urllib.request.Request(
+        OPENAI_RESPONSES_URL,
+        data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
     try:
-        completed = subprocess.run(
-            [executable, "run", selected_model],
-            input=json.dumps(revision_request, ensure_ascii=False, indent=2),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-            env={key: value for key, value in os.environ.items() if key != "OLLAMA_HOST"},
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise PromptIterationError("The local prompt-revision model failed or timed out.") from exc
-    revised = completed.stdout.strip()
-    if completed.returncode != 0 or not revised:
-        raise PromptIterationError("The local prompt-revision model did not return a prompt.")
-    return revised
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            response_data = json.loads(response.read())
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise PromptIterationError("The OpenAI prompt-revision request failed or returned invalid JSON.") from exc
+
+    revised = response_data.get("output_text", "") if isinstance(response_data, dict) else ""
+    if not revised and isinstance(response_data, dict):
+        output = response_data.get("output", [])
+        if isinstance(output, list):
+            revised = "\n".join(
+                content.get("text", "")
+                for item in output
+                if isinstance(item, dict) and isinstance(item.get("content"), list)
+                for content in item["content"]
+                if isinstance(content, dict) and content.get("type") == "output_text"
+            )
+    if not isinstance(revised, str) or not revised.strip():
+        raise PromptIterationError("OpenAI did not return revised prompt text.")
+    return revised.strip()
 
 
 def iterate_prompt_for_file(
@@ -344,10 +369,10 @@ def iterate_prompt_for_file(
 ) -> dict[str, Any]:
     """Score unique words, collect corrections, and iteratively revise the prompt.
 
-    Ollaya performs local classification. The default prompt rewriter uses a local
-    Ollama text-generation model; tests or embedding applications can inject both
-    model calls. Output artifacts are written beside the source unless output_dir
-    is supplied.
+    Ollaya performs local classification. The default prompt rewriter sends reviewed
+    error examples to the configured OpenAI model using OPENAI_API_KEY; tests or
+    embedding applications can inject both model calls. Output artifacts are
+    written beside the source unless output_dir is supplied.
     """
     source_path = Path(filename).expanduser().resolve()
     if not source_path.is_file():
@@ -373,7 +398,7 @@ def iterate_prompt_for_file(
     run_directory.mkdir(parents=True, exist_ok=True)
 
     score_word = scorer or _LocalOllayaPromptScorer().score
-    revise_prompt = prompt_reviser or _revise_prompt_locally
+    revise_prompt = prompt_reviser or _revise_prompt_with_openai
     read_input = input_fn or input
     write_output = output_fn or print
     if parsed.warnings:
@@ -433,6 +458,11 @@ def iterate_prompt_for_file(
             **summary,
             "prompt_file": prompt_path.name,
             "model": getattr(scorer, "model", SCORING_MODEL),
+            "prompt_reviser_model": (
+                getattr(prompt_reviser, "model", None)
+                if prompt_reviser
+                else os.environ.get("PROMPT_REVISER_MODEL", "").strip() or DEFAULT_PROMPT_REVISER_MODEL
+            ),
             "threshold_percent": 50,
             "source_sha256": source_hash,
             "source_format": parsed.format,
