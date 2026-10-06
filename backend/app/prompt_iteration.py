@@ -269,18 +269,14 @@ def _get_yes_probability(scores: dict[str, float], signal: str) -> float:
     return float(value)
 
 
-def _write_run_csv(path: Path, rows: Sequence[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS, extrasaction="raise")
-        writer.writeheader()
-        for row in rows:
-            scores = row["scores"]
-            writer.writerow({
-                "word": row["word"],
-                "is_identifier_percent": f"{_get_yes_probability(scores, SIGNALS[0]) * 100:.1f}",
-                "is_operationally_significant_percent": f"{_get_yes_probability(scores, SIGNALS[1]) * 100:.1f}",
-                "is_common_word_percent": f"{_get_yes_probability(scores, SIGNALS[2]) * 100:.1f}",
-            })
+def _csv_row(row: dict[str, Any]) -> dict[str, str]:
+    scores = row["scores"]
+    return {
+        "word": row["word"],
+        "is_identifier_percent": f"{_get_yes_probability(scores, SIGNALS[0]) * 100:.1f}",
+        "is_operationally_significant_percent": f"{_get_yes_probability(scores, SIGNALS[1]) * 100:.1f}",
+        "is_common_word_percent": f"{_get_yes_probability(scores, SIGNALS[2]) * 100:.1f}",
+    }
 
 
 def _prediction(scores: dict[str, float], signal: str) -> bool:
@@ -488,12 +484,18 @@ def iterate_prompt_for_file(
         prompt_path.write_text(prompt + "\n", encoding="utf-8")
         rows = []
         write_output(f"\n{run_id} — prompt v{prompt_version:03d}: scoring {len(word_rows)} unique words")
-        for word in word_rows:
-            scores = score_word({"candidate": word["word"], "context": word["context"]}, prompt)
-            rows.append({**word, "scores": scores})
-
         csv_path = run_directory / f"{run_id}.csv"
-        _write_run_csv(csv_path, rows)
+        with csv_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS, extrasaction="raise")
+            writer.writeheader()
+            stream.flush()
+            for word in word_rows:
+                scores = score_word({"candidate": word["word"], "context": word["context"]}, prompt)
+                row = {**word, "scores": scores}
+                rows.append(row)
+                writer.writerow(_csv_row(row))
+                stream.flush()
+
         _collect_user_review(
             rows,
             gold_labels,

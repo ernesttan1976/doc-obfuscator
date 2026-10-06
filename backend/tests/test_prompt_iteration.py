@@ -124,6 +124,39 @@ def test_iterate_prompt_for_file_reviews_corrects_and_runs_revised_prompt(tmp_pa
     assert review[0]["incorrect_signals"] == ""
 
 
+def test_run_csv_is_flushed_after_each_scored_word(tmp_path):
+    source = tmp_path / "brief.txt"
+    source.write_text("Alpha Beta Gamma", encoding="utf-8")
+    output_dir = tmp_path / "prompt-runs"
+    csv_path = output_dir / "run001.csv"
+    observed_rows = []
+
+    def score(state, _prompt):
+        if state["candidate"] == "Beta":
+            with csv_path.open(encoding="utf-8", newline="") as stream:
+                observed_rows.extend(csv.DictReader(stream))
+            raise RuntimeError("stop after checking incremental output")
+        return {
+            "is_identifier": 0.9,
+            "is_operationally_significant": 0.2,
+            "is_common_word": 0.1,
+        }
+
+    with pytest.raises(RuntimeError, match="incremental output"):
+        iterate_prompt_for_file(
+            source,
+            output_dir=output_dir,
+            scorer=score,
+            output_fn=lambda _message: None,
+        )
+
+    assert [row["word"] for row in observed_rows] == ["Alpha"]
+    with csv_path.open(encoding="utf-8", newline="") as stream:
+        final_rows = list(csv.DictReader(stream))
+    assert [row["word"] for row in final_rows] == ["Alpha"]
+    assert final_rows[0]["is_identifier_percent"] == "90.0"
+
+
 @pytest.mark.parametrize(
     ("parsed", "expected"),
     [

@@ -91,6 +91,8 @@ Prompt revision uses the OpenAI Responses API with `PROMPT_REVISER_MODEL` (defau
 
 The default local Ollaya scorer prints the `ollaya.jsonl` path and writes paired request/response entries for every `ollaya list` and scoring subprocess call to the run directory. Request entries include the model, complete question instructions, candidate/context state, command, and exact stdin. Response entries include raw stdout/stderr, return code, and any execution error. The log therefore contains each candidate and its bounded text context; it remains local and should be handled as sensitive document data. Injected test/application scorers do not create this log.
 
+Each run CSV is created with its header before the first score and flushed after every scored word. If execution stops partway through a run, the CSV contains the rows completed so far.
+
 ## Iteration ledger and success criteria
 
 Maintain an iteration ledger (for example, `prompt_iterations.json`) containing each run ID, prompt version, model/configuration, input-set hash, CSV path, reviewed count, incorrect word count, error rate, per-signal errors, and prompt-change rationale.
