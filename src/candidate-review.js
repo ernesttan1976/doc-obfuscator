@@ -1,5 +1,9 @@
 export function getVisibleCandidates(candidates, level) {
-  const visible = candidates.filter((candidate) => candidate.level >= 2 && candidate.level <= level);
+  const visible = candidates.filter((candidate) => (
+    candidate.scoreStatus !== 'queued'
+    && candidate.level >= 2
+    && candidate.level <= level
+  ));
   const scored = visible.filter((candidate) => Number.isInteger(candidate.reviewPriority));
   const unscored = visible.filter((candidate) => !Number.isInteger(candidate.reviewPriority));
   scored.sort((first, second) => second.reviewPriority - first.reviewPriority);
@@ -7,7 +11,10 @@ export function getVisibleCandidates(candidates, level) {
 }
 
 export function getReviewCandidates(candidates) {
-  return candidates.filter((candidate) => candidate.decision !== 'excluded' || candidate.pinned);
+  return candidates.filter((candidate) => (
+    candidate.scoreStatus !== 'queued'
+    && (candidate.decision !== 'excluded' || candidate.pinned)
+  ));
 }
 
 export function upsertCandidate(candidates, candidate) {

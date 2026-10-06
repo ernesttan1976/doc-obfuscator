@@ -177,7 +177,7 @@ export default function App() {
       .reduce((sum, candidate) => sum + candidate.occurrenceCount, 0)
     : changeRows.reduce((sum, row) => sum + (row.decision === 'excluded' ? 0 : row.occurrences), 0);
   const visibleCandidates = reviewableProjectDocument
-    ? activeFile.candidateLoading ? candidates : getVisibleCandidates(candidates, level)
+    ? getVisibleCandidates(candidates, level)
     : [];
   const reviewCandidates = reviewableProjectDocument ? getReviewCandidates(candidates) : [];
   const levelCandidates = visibleCandidates;

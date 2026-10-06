@@ -44,8 +44,30 @@ test('automatically excluded candidates are omitted from review while pinned exc
     { id: 'auto-excluded', decision: 'excluded', pinned: false },
     { id: 'manual-excluded', decision: 'excluded', pinned: true },
     { id: 'suggested', decision: 'suggested' },
+    { id: 'queued', decision: 'suggested', scoreStatus: 'queued' },
   ]);
   assert.deepEqual(review.map(({ id }) => id), ['manual-excluded', 'suggested']);
+});
+
+test('queued Stage 1 words stay out of review and preview until scoring completes', () => {
+  const queued = { id: 'queued', level: 8, decision: 'suggested', scoreStatus: 'queued' };
+  const commonWord = {
+    id: 'common-word',
+    level: 8,
+    decision: 'excluded',
+    scoreStatus: 'complete',
+    signals: {
+      isCommonWord: { answer: 'Yes' },
+      isIdentifier: { answer: 'No' },
+      isOperationallySignificant: { answer: 'No' },
+    },
+  };
+  const scoredCandidate = { id: 'scored', level: 8, decision: 'suggested', scoreStatus: 'complete' };
+
+  assert.deepEqual(getReviewCandidates([queued, commonWord, scoredCandidate]).map(({ id }) => id), ['scored']);
+  assert.deepEqual(getVisibleCandidates([queued, commonWord, scoredCandidate], 10).map(({ id }) => id), [
+    'common-word', 'scored',
+  ]);
 });
 
 test('candidates with Ollaya review priorities are ordered highest review priority first', () => {
