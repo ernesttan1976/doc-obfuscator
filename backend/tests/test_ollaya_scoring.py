@@ -321,6 +321,42 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
     assert b'"context"' not in encrypted_state
 
 
+def test_project_analysis_reuses_saved_csv_scores_without_calling_ollaya(tmp_path):
+    class Scorer:
+        def __init__(self):
+            self.calls = 0
+
+        def score_candidate(self, _features):
+            self.calls += 1
+            return score_result_from_signals({
+                "isIdentifier": {"answer": "Yes", "probabilityYes": 0.91},
+                "isOperationallySignificant": {"answer": "No", "probabilityYes": 0.2},
+                "isCommonWord": {"answer": "No", "probabilityYes": 0.1},
+            })
+
+    project_dir = tmp_path / "workspace"
+    project_dir.mkdir()
+    source = tmp_path / "brief.txt"
+    source.write_text("Alex Tan briefed Jordan Lee on Project Falcon.", encoding="utf-8")
+    key_store = MemoryKeyStore()
+    initial_scorer = Scorer()
+    initial_service = ProjectService(key_store, ollaya_scorer=initial_scorer)
+    initial_service.create(project_dir, "Test workspace")
+    document = initial_service.import_documents(project_dir, [source])[0]
+
+    initial = initial_service.analyze_document_candidates(project_dir, document.document_id)
+    reloaded_scorer = Scorer()
+    reloaded_service = ProjectService(key_store, ollaya_scorer=reloaded_scorer)
+    reloaded = reloaded_service.analyze_document_candidates(project_dir, document.document_id)
+    by_term = {candidate["term"]: candidate for candidate in reloaded["candidates"]}
+
+    assert initial_scorer.calls == len(initial["candidates"])
+    assert reloaded_scorer.calls == 0
+    assert reloaded["ollayaStatus"] == "ready"
+    assert all(candidate["scoreStatus"] == "complete" for candidate in reloaded["candidates"])
+    assert by_term["Alex"]["signals"]["isIdentifier"]["probabilityYes"] == 0.91
+
+
 def test_project_analysis_runs_ollaya_candidates_up_to_configured_parallel_limit(tmp_path, monkeypatch):
     monkeypatch.setenv("OLLAYA_PARALLEL_RUNS", "2")
 

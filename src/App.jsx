@@ -30,6 +30,8 @@ const initialFiles = [
 ];
 
 const RECENT_PROJECTS_KEY = 'blot-recent-projects';
+const ACTIVE_PROJECT_KEY = 'blot-active-project';
+const ACTIVE_DOCUMENT_KEY = 'blot-active-document';
 const OLLAYA_CSV_COLUMNS = [
   ['word', 'Word'],
   ['is_identifier_percent', 'Identifier'],
@@ -55,6 +57,21 @@ const readRecentProjects = () => {
   } catch {
     return [];
   }
+};
+
+const readActiveDocumentId = () => {
+  try {
+    return localStorage.getItem(ACTIVE_DOCUMENT_KEY) || '';
+  } catch {
+    return '';
+  }
+};
+
+const rememberActiveDocument = (documentId) => {
+  if (!documentId) return;
+  try {
+    localStorage.setItem(ACTIVE_DOCUMENT_KEY, documentId);
+  } catch { /* Restoring the selected document is optional when browser storage is unavailable. */ }
 };
 
 const countMatches = (text, value) => {
@@ -159,6 +176,7 @@ export default function App() {
   });
   const csvLoadSequence = useRef(0);
   const csvColumnResize = useRef(null);
+  const activeProjectRestoreAttempted = useRef(false);
   const [manualPhrase, setManualPhrase] = useState('');
   const [mergeGroupIds, setMergeGroupIds] = useState([]);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState([]);
@@ -1439,6 +1457,7 @@ export default function App() {
       setProjectDirectory(backupDirectory);
       setFiles(restoredDocuments);
       setActiveName(restoredDocuments[0]?.id || '');
+      rememberActiveDocument(restoredDocuments[0]?.id);
       setSectionIndex(0);
       setBackupDialog(null);
       setBackupPassphrase('');
@@ -1506,6 +1525,7 @@ export default function App() {
       setCurrentProject(data);
       setFiles(savedDocuments);
       setActiveName(savedDocuments[0]?.id || '');
+      rememberActiveDocument(savedDocuments[0]?.id);
       setSectionIndex(0);
       setDenseText(false);
       setProjectModalOpen(false);
@@ -1530,6 +1550,7 @@ export default function App() {
     setRecentProjects(updated);
     try {
       localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(updated));
+      localStorage.setItem(ACTIVE_PROJECT_KEY, directory);
     } catch { /* Recent workspace shortcuts are optional when browser storage is unavailable. */ }
   };
 
@@ -1558,18 +1579,21 @@ export default function App() {
         heading: `${document.name} · saved original`,
         isProjectDocument: true,
       }));
+      const activeDocument = savedDocuments.find((document) => document.id === readActiveDocumentId())
+        || savedDocuments[0];
       rememberProject(data, recent.directory);
       setCurrentProject(data);
       setFiles(savedDocuments);
-      setActiveName(savedDocuments[0]?.id || '');
+      setActiveName(activeDocument?.id || '');
       setSectionIndex(0);
       setDenseText(false);
       setView('preview');
       setUndo(null);
       setExportPreview(null);
       setRestorePreviewData(null);
-      if (savedDocuments[0]) {
-        await loadProjectDocumentPreview(savedDocuments[0].id, savedDocuments[0].versionId, 'original', recent.directory);
+      if (activeDocument) {
+        rememberActiveDocument(activeDocument.id);
+        await loadProjectDocumentPreview(activeDocument.id, activeDocument.versionId, 'original', recent.directory);
       }
       setToast(`Opened local workspace “${data.name}”`);
     } catch (error) {
@@ -1578,6 +1602,21 @@ export default function App() {
       setProjectBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (!localToken || currentProject || projectBusy || activeProjectRestoreAttempted.current) return;
+    let directory = '';
+    try {
+      directory = localStorage.getItem(ACTIVE_PROJECT_KEY) || recentProjects[0]?.directory || '';
+    } catch {
+      return;
+    }
+    if (!directory) return;
+    activeProjectRestoreAttempted.current = true;
+    const recent = recentProjects.find((project) => project.directory === directory)
+      || { directory, name: 'Local workspace' };
+    void openRecentProject(recent);
+  }, [localToken]);
 
   const showProjectDialog = () => {
     setProjectAction('create');
@@ -1628,6 +1667,7 @@ export default function App() {
   const switchFile = (file) => {
     setExportPreview(null);
     setActiveName(file.id || file.name);
+    if (file.isProjectDocument) rememberActiveDocument(file.id);
     setSectionIndex(0);
     setDenseText(false);
     if (file.previewSections?.length) {

@@ -43,6 +43,7 @@ from .ollaya_scoring import (
     apply_common_word_filter,
     build_ollaya_scoring_input,
     get_ollaya_parallel_runs,
+    score_result_from_signals,
     should_auto_suggest,
     unavailable_score,
 )
@@ -119,6 +120,34 @@ def _ollaya_csv_row(candidate: dict[str, object]) -> dict[str, object]:
         },
         "is_correct": "N",
     }
+
+
+def _apply_saved_ollaya_result(
+    candidate: dict[str, Any],
+    row: dict[str, object],
+    model: str,
+) -> str:
+    signal_columns = {
+        "is_identifier_percent": "isIdentifier",
+        "is_operationally_significant_percent": "isOperationallySignificant",
+        "is_common_word_percent": "isCommonWord",
+    }
+    signals = {}
+    for column, signal_name in signal_columns.items():
+        probability = row.get(column)
+        if probability in (None, ""):
+            continue
+        probability = float(probability)
+        signals[signal_name] = {
+            "answer": "Yes" if probability >= 0.5 else "No",
+            "probabilityYes": probability,
+        }
+    candidate.update(score_result_from_signals(signals, model))
+    priority = candidate.get("reviewPriority")
+    if isinstance(priority, int):
+        candidate["level"] = max(2, min(10, priority))
+    apply_common_word_filter(candidate)
+    return str(candidate.get("scoreStatus", "unavailable"))
 
 
 class ProjectError(Exception):
@@ -1195,10 +1224,36 @@ class ProjectService:
             if on_candidate is not None:
                 on_candidate(dict(candidate))
 
+        ollaya_results_path = self._ollaya_results_path(root, document_id) if candidates else None
+        saved_rows = self.get_ollaya_results(root, document_id)["rows"] if candidates else []
+        saved_by_word = {
+            str(row["word"]).casefold(): row
+            for row in saved_rows
+            if isinstance(row, dict) and row.get("word")
+        }
+        candidates_to_score = []
+        for candidate in candidates:
+            saved = saved_by_word.get(str(candidate.get("term", "")).casefold())
+            if saved is None:
+                candidates_to_score.append(candidate)
+                continue
+            score_status = _apply_saved_ollaya_result(
+                candidate,
+                saved,
+                getattr(self.ollaya_scorer, "model", None) or "saved-csv",
+            )
+            if score_status in {"complete", "partial"}:
+                ollaya_scored_count += 1
+                if score_status == "partial":
+                    ollaya_failures += 1
+            else:
+                ollaya_failures += 1
+            if on_candidate is not None:
+                on_candidate(dict(candidate))
+
         if self.ollaya_scorer is not None:
-            if candidates:
-                ollaya_results_path = self._ollaya_results_path(root, document_id)
-                max_workers = min(get_ollaya_parallel_runs(), len(candidates))
+            if candidates_to_score:
+                max_workers = min(get_ollaya_parallel_runs(), len(candidates_to_score))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     scoring = {
                         executor.submit(
@@ -1206,7 +1261,7 @@ class ProjectService:
                                 build_ollaya_scoring_input(candidate, blocks)
                             ),
                         ): candidate
-                        for candidate in candidates
+                        for candidate in candidates_to_score
                     }
                     scored_candidates = as_completed(scoring)
                     for future in scored_candidates:
@@ -1227,12 +1282,13 @@ class ProjectService:
                             candidate.update(unavailable_score())
                             ollaya_failures += 1
                         apply_common_word_filter(candidate)
+                        assert ollaya_results_path is not None
                         self._record_ollaya_result(ollaya_results_path, _ollaya_csv_row(candidate))
                         if on_candidate is not None:
                             on_candidate(dict(candidate))
         else:
-            ollaya_failures = len(candidates)
-            for candidate in candidates:
+            ollaya_failures += len(candidates_to_score)
+            for candidate in candidates_to_score:
                 candidate.update(unavailable_score())
                 apply_common_word_filter(candidate)
                 if on_candidate is not None:
