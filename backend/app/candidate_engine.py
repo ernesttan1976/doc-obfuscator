@@ -292,7 +292,7 @@ def extract_word_candidates(
     for block in blocks:
         for match in _WORD.finditer(block.text):
             term = match.group(0)
-            if len(term) > 256:
+            if len(term) > 256 or (term.isdecimal() and int(term) <= 100):
                 continue
             _add_occurrence(
                 collected,

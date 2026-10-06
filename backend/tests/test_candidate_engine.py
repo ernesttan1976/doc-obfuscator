@@ -97,6 +97,16 @@ def test_stage_one_extracts_more_than_one_thousand_unique_words():
     assert len(candidates) == 1_001
 
 
+def test_stage_one_does_not_extract_numbers_from_zero_through_one_hundred():
+    candidates = extract_word_candidates(
+        [CandidateBlock("text", "0 1 99 100 101 1000 alpha")],
+        "doc-1",
+        "version-1",
+    )
+
+    assert {candidate["term"] for candidate in candidates} == {"101", "1000", "alpha"}
+
+
 def test_manual_phrase_is_included_and_pinned_and_decisions_survive_analysis():
     blocks = [CandidateBlock("text", "Project Cedar; project cedar remains internal.")]
     candidates = analyze_candidates(blocks, "doc-1", "version-1", manual_terms=["Project Cedar"])
