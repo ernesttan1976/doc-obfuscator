@@ -112,6 +112,15 @@ class _LocalOllayaPromptScorer:
             "--state-json",
         ]
         request_input = json.dumps(word, ensure_ascii=False, separators=(",", ":"))
+        request_payload = {
+            "model": self.model,
+            "questions": questions,
+            "state": word,
+            "format": "json",
+        }
+        self._log_output(
+            "request", "score", command, request_payload, raw_stdin=request_input
+        )
         try:
             completed = subprocess.run(
                 command,
@@ -122,9 +131,9 @@ class _LocalOllayaPromptScorer:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            self._log_output("score", command, request_input, error=exc)
+            self._log_output("response", "score", command, request_payload, error=exc)
             raise PromptIterationError("The local Ollaya scoring call failed or timed out.") from exc
-        self._log_output("score", command, request_input, completed=completed)
+        self._log_output("response", "score", command, request_payload, completed=completed)
         if completed.returncode != 0:
             raise PromptIterationError("Local Ollaya scoring failed.")
         try:
@@ -145,18 +154,21 @@ class _LocalOllayaPromptScorer:
         if self._model_checked:
             return
         assert self.executable is not None
+        command = [self.executable, "list"]
+        request_payload = {"operation": "list_models"}
+        self._log_output("request", "model_list", command, request_payload)
         try:
             completed = subprocess.run(
-                [self.executable, "list"],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=10,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            self._log_output("model_list", [self.executable, "list"], error=exc)
+            self._log_output("response", "model_list", command, request_payload, error=exc)
             raise PromptIterationError("The local Ollaya model list could not be checked.") from exc
-        self._log_output("model_list", [self.executable, "list"], completed=completed)
+        self._log_output("response", "model_list", command, request_payload, completed=completed)
         installed = {
             line.split()[0]
             for line in completed.stdout.splitlines()
@@ -169,9 +181,11 @@ class _LocalOllayaPromptScorer:
     def _log_output(
         self,
         event: str,
+        operation: str,
         command: Sequence[str],
-        request_input: str | None = None,
+        request: dict[str, Any],
         *,
+        raw_stdin: str | None = None,
         completed: Any = None,
         error: BaseException | None = None,
     ) -> None:
@@ -188,14 +202,23 @@ class _LocalOllayaPromptScorer:
         entry = {
             "timestamp": datetime.now(UTC).isoformat(),
             "event": event,
+            "operation": operation,
             "model": self.model,
             "command": list(command),
-            "request": request_input,
-            "returncode": getattr(completed, "returncode", None),
-            "stdout": output_text(getattr(completed, "stdout", None) if completed is not None else getattr(error, "stdout", None)),
-            "stderr": output_text(getattr(completed, "stderr", None) if completed is not None else getattr(error, "stderr", None)),
-            "error": f"{type(error).__name__}: {error}" if error is not None else None,
+            "request": request,
+            "raw_stdin": raw_stdin,
         }
+        if event == "response":
+            entry["response"] = {
+                "returncode": getattr(completed, "returncode", None),
+                "stdout": output_text(
+                    getattr(completed, "stdout", None) if completed is not None else getattr(error, "stdout", None)
+                ),
+                "stderr": output_text(
+                    getattr(completed, "stderr", None) if completed is not None else getattr(error, "stderr", None)
+                ),
+                "error": f"{type(error).__name__}: {error}" if error is not None else None,
+            }
         try:
             with self.log_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -444,10 +467,13 @@ def iterate_prompt_for_file(
             raise PromptIterationError(f"Output directory is not empty: {run_directory}")
     run_directory.mkdir(parents=True, exist_ok=True)
 
-    score_word = scorer or _LocalOllayaPromptScorer(log_path=run_directory / "ollaya.jsonl").score
+    local_ollaya_log = run_directory / "ollaya.jsonl" if scorer is None else None
+    score_word = scorer or _LocalOllayaPromptScorer(log_path=local_ollaya_log).score
     revise_prompt = prompt_reviser or _revise_prompt_with_openai
     read_input = input_fn or input
     write_output = output_fn or print
+    if local_ollaya_log is not None:
+        write_output(f"Ollaya request/response log: {local_ollaya_log}")
     if parsed.warnings:
         write_output("Document-to-text conversion warnings: " + "; ".join(parsed.warnings))
     prompt = INITIAL_PROMPT

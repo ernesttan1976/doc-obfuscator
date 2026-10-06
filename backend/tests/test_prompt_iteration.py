@@ -42,14 +42,23 @@ def test_local_ollaya_scorer_logs_raw_outputs_and_requests(tmp_path, monkeypatch
         "is_common_word": 0.2,
     }
     entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
-    assert [entry["event"] for entry in entries] == ["model_list", "score"]
-    assert entries[0]["stdout"] == "NAME\nvon:1.1\n"
-    assert entries[1]["stdout"] == response
-    assert entries[1]["stderr"] == "scoring diagnostic"
-    assert json.loads(entries[1]["request"]) == {
+    assert [(entry["event"], entry["operation"]) for entry in entries] == [
+        ("request", "model_list"),
+        ("response", "model_list"),
+        ("request", "score"),
+        ("response", "score"),
+    ]
+    assert entries[1]["response"]["stdout"] == "NAME\nvon:1.1\n"
+    score_request = entries[2]
+    assert score_request["request"]["model"] == "von:1.1"
+    assert score_request["request"]["questions"]["is_identifier"]["instructions"].startswith("Review entities")
+    assert score_request["request"]["state"] == {
         "candidate": "Falcon",
         "context": "Falcon launches at dawn.",
     }
+    assert json.loads(score_request["raw_stdin"]) == score_request["request"]["state"]
+    assert entries[3]["response"]["stdout"] == response
+    assert entries[3]["response"]["stderr"] == "scoring diagnostic"
 
 
 def test_iterate_prompt_for_file_reviews_corrects_and_runs_revised_prompt(tmp_path):
