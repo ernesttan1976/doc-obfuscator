@@ -168,7 +168,7 @@ class CandidateDecisionRequest(BaseModel):
 class CandidateBulkDecisionRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=4096)
     document_id: str = Field(min_length=1, max_length=100)
-    candidate_ids: list[str] = Field(min_length=1, max_length=1000)
+    candidate_ids: list[str] = Field(min_length=1)
     decision: str = Field(min_length=1, max_length=20)
 
 

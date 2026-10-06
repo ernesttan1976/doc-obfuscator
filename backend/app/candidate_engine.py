@@ -9,8 +9,6 @@ from itertools import pairwise
 
 from .document_adapters import ParsedDocument
 
-MAX_CANDIDATES_PER_VERSION = 1_000
-MAX_CANDIDATES_PER_CATEGORY = 1_000
 MAX_OCCURRENCES_PER_CANDIDATE = 2_000
 # Priorities run from 2 (most sensitive) to 10 (least sensitive). These are
 # heuristics for filtering, not a guarantee that every occurrence was found.
@@ -113,7 +111,6 @@ def analyze_candidates(
         if node.get("documentId") == document_id and node.get("versionId") == version_id
     }
     collected: dict[str, dict[str, object]] = {}
-    category_counts: dict[str, int] = {}
 
     def report_candidate(discovered: dict[str, object]) -> None:
         if on_candidate is None:
@@ -164,7 +161,6 @@ def analyze_candidates(
                     continue
                 _add_occurrence(
                     collected,
-                    category_counts,
                     term,
                     category,
                     block.location,
@@ -175,7 +171,6 @@ def analyze_candidates(
         for start, end in _capitalized_phrase_matches(block.text):
             _add_occurrence(
                 collected,
-                category_counts,
                 block.text[start:end],
                 "CAPITALIZED_PHRASE",
                 block.location,
@@ -205,7 +200,6 @@ def analyze_candidates(
             continue
         _add_occurrence(
             collected,
-            category_counts,
             term,
             "NER_ENTITY",
             location,
@@ -227,7 +221,6 @@ def analyze_candidates(
                 found = True
                 _add_occurrence(
                     collected,
-                    category_counts,
                     match.group(0),
                     "MANUAL",
                     block.location,
@@ -277,9 +270,6 @@ def analyze_candidates(
                 "pinned": bool(previous.get("pinned", record["manual"])),
             }
         )
-        if len(nodes) >= MAX_CANDIDATES_PER_VERSION:
-            break
-
     return nodes
 
 
@@ -298,7 +288,6 @@ def extract_word_candidates(
         if node.get("documentId") == document_id and node.get("versionId") == version_id
     }
     collected: dict[str, dict[str, object]] = {}
-    category_counts: dict[str, int] = {}
 
     for block in blocks:
         for match in _WORD.finditer(block.text):
@@ -307,7 +296,6 @@ def extract_word_candidates(
                 continue
             _add_occurrence(
                 collected,
-                category_counts,
                 term,
                 "WORD",
                 block.location,
@@ -325,7 +313,6 @@ def extract_word_candidates(
                 found = True
                 _add_occurrence(
                     collected,
-                    category_counts,
                     match.group(0),
                     "MANUAL",
                     block.location,
@@ -368,8 +355,6 @@ def extract_word_candidates(
                 "pinned": bool(preserved.get(normalized_term, {}).get("pinned", record["manual"])),
             }
         )
-        if len(nodes) >= MAX_CANDIDATES_PER_VERSION:
-            break
     return nodes
 
 
@@ -386,7 +371,6 @@ def decide_candidate(nodes: list[dict[str, object]], candidate_id: str, decision
 
 def _add_occurrence(
     collected: dict[str, dict[str, object]],
-    category_counts: dict[str, int],
     term: str,
     category: str,
     location: str,
@@ -406,8 +390,6 @@ def _add_occurrence(
     previous_category = str(current["category"]) if current is not None else category
     had_source = source in current["sources"] if current is not None else False
     if current is None:
-        if category_counts.get(category, 0) >= MAX_CANDIDATES_PER_CATEGORY and category != "MANUAL":
-            return
         current = {
             "term": term,
             "category": category,
@@ -419,12 +401,8 @@ def _add_occurrence(
             "nerScore": 0.0,
         }
         collected[normalized] = current
-        category_counts[category] = category_counts.get(category, 0) + 1
     elif _category_priority(category) < _category_priority(str(current["category"])):
-        previous_category = str(current["category"])
         current["category"] = category
-        category_counts[previous_category] -= 1
-        category_counts[category] = category_counts.get(category, 0) + 1
     current["manual"] = bool(current["manual"]) or category == "MANUAL"
     sources = current["sources"]
     assert isinstance(sources, set)
