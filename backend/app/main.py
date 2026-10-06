@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import secrets
-import time
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -145,10 +144,6 @@ class PortableBackupRestoreRequest(PortableBackupRequest):
     backup_path: str = Field(min_length=1, max_length=4096)
 
 
-class SessionUnlockRequest(BaseModel):
-    directory: str = Field(min_length=1, max_length=4096)
-
-
 class AnalyzeCandidatesRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=4096)
     document_id: str = Field(min_length=1, max_length=100)
@@ -181,6 +176,12 @@ class CandidateGroupRequest(BaseModel):
     group_ids: list[str] = Field(default_factory=list, max_length=1000)
 
 
+class OllayaResultRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    row: dict[str, object]
+    previous_word: str | None = Field(default=None, max_length=256)
+
+
 class ModelDownloadRequest(BaseModel):
     confirmed: bool = False
 
@@ -201,10 +202,6 @@ def create_app(
     local_token = secrets.token_urlsafe(32)
     dev_origins = _configured_dev_origins()
     app.state.local_token = local_token
-    app.state.session_last_activity = time.monotonic()
-    app.state.session_locked = False
-    app.state.session_idle_timeout_seconds = 15 * 60
-    app.state.active_project_directory = None
     app.state.model_manager = LocalModelManager(models_directory)
     app.state.ollaya_scorer = ollaya_scorer or LocalOllayaScorer()
     app.state.project_service = (
@@ -237,23 +234,6 @@ def create_app(
                 supplied = request.headers.get("x-local-app-token", "")
                 if not hmac.compare_digest(supplied, local_token):
                     return JSONResponse({"detail": "A valid local app token is required."}, status_code=401)
-                now = time.monotonic()
-                if (
-                    request.url.path != "/api/session/unlock"
-                    and app.state.active_project_directory is not None
-                    and now - app.state.session_last_activity >= app.state.session_idle_timeout_seconds
-                ):
-                    app.state.session_locked = True
-                    service = app.state.project_service
-                    if service is not None:
-                        service.clear_pending_operations()
-                if app.state.session_locked and request.url.path != "/api/session/unlock":
-                    return JSONResponse(
-                        {"detail": "The local project session is locked after 15 minutes of inactivity."},
-                        status_code=423,
-                    )
-                if request.url.path not in {"/api/session", "/api/session/unlock"}:
-                    app.state.session_last_activity = now
         return await call_next(request)
 
     @app.get("/api/health")
@@ -270,28 +250,7 @@ def create_app(
         return response
 
     @app.get("/api/session")
-    async def session() -> dict[str, str | int]:
-        return {
-            "status": "locked" if app.state.session_locked else "ready",
-            "storage": "os-credential-store",
-            "idleTimeoutSeconds": app.state.session_idle_timeout_seconds,
-        }
-
-    @app.post("/api/session/activity")
-    async def record_session_activity() -> dict[str, str]:
-        return {"status": "ready"}
-
-    @app.post("/api/session/unlock")
-    def unlock_session(payload: SessionUnlockRequest) -> dict[str, str]:
-        try:
-            project = project_service().open(payload.directory)
-        except KeyStoreUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except ProjectError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        app.state.session_locked = False
-        app.state.active_project_directory = str(project.directory)
-        app.state.session_last_activity = time.monotonic()
+    async def session() -> dict[str, str]:
         return {"status": "ready", "storage": "os-credential-store"}
 
     @app.get("/api/models/ner/status")
@@ -329,7 +288,6 @@ def create_app(
     def create_project(payload: CreateProjectRequest) -> dict[str, object]:
         try:
             project = project_service().create(payload.directory, payload.name)
-            app.state.active_project_directory = str(project.directory)
             return {**project.to_public_dict(), "documents": []}
         except KeyStoreUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -341,7 +299,6 @@ def create_app(
         try:
             service = project_service()
             project = service.open(payload.directory)
-            app.state.active_project_directory = str(project.directory)
             documents = service.list_documents(payload.directory)
             return {
                 **project.to_public_dict(),
@@ -519,7 +476,6 @@ def create_app(
                 payload.backup_path,
                 payload.passphrase,
             )
-            app.state.active_project_directory = str(project.directory)
             service = project_service()
             return {
                 **project.to_public_dict(),
@@ -543,6 +499,30 @@ def create_app(
         except DocumentAdapterError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except (CandidateError, ProjectError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/projects/ollaya-results")
+    def get_ollaya_results(directory: str) -> dict[str, object]:
+        try:
+            rows = project_service().get_ollaya_results(directory)
+            return {"filename": "ollaya_results.csv", "rows": rows}
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/projects/ollaya-results/row")
+    def update_ollaya_result(payload: OllayaResultRequest) -> dict[str, object]:
+        try:
+            row = project_service().update_ollaya_result(
+                payload.directory,
+                payload.row,
+                payload.previous_word,
+            )
+            return {"row": row}
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/projects/document-candidates/stream")

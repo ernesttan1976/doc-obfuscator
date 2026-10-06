@@ -30,6 +30,21 @@ const initialFiles = [
 ];
 
 const RECENT_PROJECTS_KEY = 'blot-recent-projects';
+const OLLAYA_CSV_COLUMNS = [
+  ['word', 'Word'],
+  ['is_identifier_percent', 'Identifier'],
+  ['is_operationally_significant_percent', 'Operational'],
+  ['is_common_word_percent', 'Common word'],
+  ['is_correct', 'Correct'],
+];
+
+const csvRowFromCandidate = (candidate) => ({
+  word: candidate.term,
+  is_identifier_percent: candidate.signals?.isIdentifier?.probabilityYes ?? '',
+  is_operationally_significant_percent: candidate.signals?.isOperationallySignificant?.probabilityYes ?? '',
+  is_common_word_percent: candidate.signals?.isCommonWord?.probabilityYes ?? '',
+  is_correct: 'N',
+});
 
 const readRecentProjects = () => {
   try {
@@ -128,8 +143,10 @@ export default function App() {
   const [backupPassphrase, setBackupPassphrase] = useState('');
   const [backupDirectory, setBackupDirectory] = useState('');
   const [backupBusy, setBackupBusy] = useState(false);
-  const [sessionLocked, setSessionLocked] = useState(false);
-  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [ollayaRows, setOllayaRows] = useState([]);
+  const [ollayaCsvOpen, setOllayaCsvOpen] = useState(false);
+  const [ollayaCsvStatus, setOllayaCsvStatus] = useState('');
+  const [ollayaCsvError, setOllayaCsvError] = useState('');
   const [manualPhrase, setManualPhrase] = useState('');
   const [mergeGroupIds, setMergeGroupIds] = useState([]);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState([]);
@@ -191,6 +208,46 @@ export default function App() {
   const unsupportedPartCount = previewCoverage?.unsupportedPartCount || 0;
   const exportPreviewText = exportPreview ? previewLines(exportPreview.preview).join('\n') : '';
 
+  const editOllayaCsvCell = (rowIndex, column, value) => {
+    setOllayaRows((current) => current.map((row, index) => (
+      index === rowIndex
+        ? { ...row, [column]: value, ...(column === 'is_correct' ? { _correctnessDirty: true } : {}) }
+        : row
+    )));
+    setOllayaCsvStatus('Unsaved edits');
+  };
+
+  const saveOllayaCsvRow = async (rowIndex, column, value) => {
+    const currentRow = ollayaRows[rowIndex];
+    if (!currentRow || !projectDirectory || !localToken) return;
+    const row = {
+      ...currentRow,
+      [column]: column.endsWith('_percent') && value !== '' ? Number(value) : value,
+    };
+    setOllayaCsvStatus('Saving…');
+    setOllayaCsvError('');
+    try {
+      const response = await fetch('/api/projects/ollaya-results/row', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
+        body: JSON.stringify({
+          directory: projectDirectory,
+          previous_word: currentRow._originalWord || currentRow.word,
+          row: Object.fromEntries(OLLAYA_CSV_COLUMNS.map(([name]) => [name, row[name]])),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not save Ollaya CSV');
+      setOllayaRows((current) => current.map((item, index) => (
+        index === rowIndex ? { ...data.row, _originalWord: data.row.word, _correctnessDirty: false } : item
+      )));
+      setOllayaCsvStatus('Saved locally');
+    } catch (error) {
+      setOllayaCsvStatus('');
+      setOllayaCsvError(error.message || 'Could not save Ollaya CSV');
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     fetch('/api/bootstrap', { cache: 'no-store' })
@@ -210,65 +267,48 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!localToken) return undefined;
+    if (!currentProject || !projectDirectory || !localToken) {
+      setOllayaRows([]);
+      setOllayaCsvError('');
+      return undefined;
+    }
     let cancelled = false;
-    const checkSession = async () => {
-      try {
-        const response = await fetch('/api/session', {
-          headers: { 'X-Local-App-Token': localToken },
-          cache: 'no-store',
+    setOllayaRows([]);
+    setOllayaCsvStatus('Loading CSV…');
+    fetch(`/api/projects/ollaya-results?directory=${encodeURIComponent(projectDirectory)}`, {
+      headers: { 'X-Local-App-Token': localToken },
+      cache: 'no-store',
+    }).then(async (response) => {
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not load Ollaya CSV');
+      if (!cancelled) {
+        setOllayaRows((current) => {
+          const merged = new Map(data.rows.map((row) => [row.word.toLocaleLowerCase(), { ...row, _originalWord: row.word }]));
+          current.forEach((row) => {
+            const key = (row._originalWord || row.word).toLocaleLowerCase();
+            const saved = merged.get(key);
+            merged.set(key, saved
+              ? {
+                ...saved,
+                ...row,
+                is_correct: row._correctnessDirty ? row.is_correct : saved.is_correct,
+                _originalWord: saved.word,
+              }
+              : row);
+          });
+          return [...merged.values()];
         });
-        if (response.status === 423 && !cancelled) {
-          setSessionLocked(true);
-          setCurrentProject(null);
-          setFiles([]);
-          setExportPreview(null);
-          setRestorePreviewData(null);
-          setBackupDialog(null);
-          setBackupPassphrase('');
-        }
-      } catch { /* The local-service banner reports availability separately. */ }
-    };
-    void checkSession();
-    const timer = window.setInterval(checkSession, 30_000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [localToken]);
-
-  useEffect(() => {
-    if (!currentProject || !localToken || sessionLocked) return undefined;
-    let idleTimer;
-    let lastHeartbeat = 0;
-    const lockSession = () => {
-      setSessionLocked(true);
-      setCurrentProject(null);
-      setFiles([]);
-      setExportPreview(null);
-      setRestorePreviewData(null);
-      setBackupDialog(null);
-      setBackupPassphrase('');
-      setToast('The local workspace locked after 15 minutes without activity. Reopen it through the OS credential store.');
-    };
-    const recordActivity = () => {
-      window.clearTimeout(idleTimer);
-      idleTimer = window.setTimeout(lockSession, 15 * 60 * 1000);
-      if (Date.now() - lastHeartbeat > 60_000) {
-        lastHeartbeat = Date.now();
-        void fetch('/api/session/activity', {
-          method: 'POST',
-          headers: { 'X-Local-App-Token': localToken },
-        }).then((response) => {
-          if (response.status === 423) lockSession();
-        }).catch(() => {});
+        setOllayaCsvStatus('Saved locally');
+        setOllayaCsvError('');
       }
-    };
-    const activityEvents = ['pointerdown', 'pointermove', 'keydown', 'touchstart'];
-    activityEvents.forEach((name) => window.addEventListener(name, recordActivity, { passive: true }));
-    recordActivity();
-    return () => {
-      window.clearTimeout(idleTimer);
-      activityEvents.forEach((name) => window.removeEventListener(name, recordActivity));
-    };
-  }, [currentProject?.id, localToken, sessionLocked]);
+    }).catch((error) => {
+      if (!cancelled) {
+        setOllayaCsvStatus('');
+        setOllayaCsvError(error.message || 'Could not load Ollaya CSV');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [currentProject?.id, projectDirectory, localToken]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -631,6 +671,24 @@ export default function App() {
         if (!line.trim()) return;
         const event = JSON.parse(line);
         if (event.type === 'candidate') {
+          if (event.candidate.scoreStatus !== 'queued') {
+            const csvRow = csvRowFromCandidate(event.candidate);
+            setOllayaRows((current) => {
+              const rowIndex = current.findIndex((row) => (
+                (row._originalWord || row.word).toLocaleLowerCase() === csvRow.word.toLocaleLowerCase()
+              ));
+              if (rowIndex < 0) return [...current, { ...csvRow, _originalWord: csvRow.word }];
+              return current.map((row, index) => index === rowIndex
+                ? {
+                  ...csvRow,
+                  is_correct: row._correctnessDirty ? row.is_correct : row.is_correct || 'N',
+                  _originalWord: row._originalWord || row.word,
+                  _correctnessDirty: row._correctnessDirty || false,
+                }
+                : row);
+            });
+            setOllayaCsvStatus('Saved locally');
+          }
           setFiles((current) => current.map((file) => {
             if (file.id !== documentId) return file;
             const currentCandidates = file.candidates || [];
@@ -1437,55 +1495,6 @@ export default function App() {
     }
   };
 
-  const unlockProjectSession = async () => {
-    if (!projectDirectory || !localToken) {
-      setProjectModalOpen(true);
-      setProjectAction('open');
-      return;
-    }
-    setUnlockBusy(true);
-    try {
-      const response = await fetch('/api/session/unlock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
-        body: JSON.stringify({ directory: projectDirectory }),
-      });
-      const unlock = await response.json();
-      if (!response.ok) throw new Error(unlock.detail || 'Could not unlock the local project');
-      const projectResponse = await fetch('/api/projects/open', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
-        body: JSON.stringify({ directory: projectDirectory }),
-      });
-      const data = await projectResponse.json();
-      if (!projectResponse.ok) throw new Error(data.detail || 'Could not reopen the local project');
-      const savedDocuments = (data.documents || []).map((document) => ({
-        id: document.id,
-        versionId: document.versionId,
-        versions: document.versions || [],
-        selectedVersionId: document.versionId,
-        name: document.name,
-        type: document.type,
-        status: 'Saved project document',
-        content: ['Loading a local parsed preview…'],
-        rawText: '',
-        heading: `${document.name} · saved project`,
-        isProjectDocument: true,
-      }));
-      rememberProject(data, projectDirectory);
-      setCurrentProject(data);
-      setFiles(savedDocuments);
-      setActiveName(savedDocuments[0]?.id || '');
-      setSessionLocked(false);
-      if (savedDocuments[0]) await loadProjectDocumentPreview(savedDocuments[0].id);
-      setToast('Local project reopened through the operating-system credential store.');
-    } catch (error) {
-      setToast(error.message || 'Could not unlock the local project');
-    } finally {
-      setUnlockBusy(false);
-    }
-  };
-
   const showProjectDialog = () => {
     setProjectAction('create');
     setProjectName('');
@@ -1606,7 +1615,20 @@ export default function App() {
             </section>
             <aside className="right-stack">
               {reviewableProjectDocument ? <section className="panel candidate-panel">
-                <div className="panel-head"><span className="panel-title">Word review</span><span className="panel-meta">{reviewCandidates.length} unique words</span></div>
+                <div className="panel-head"><span className="panel-title">Word review</span><div className="ollaya-csv-heading"><span className="panel-meta">{reviewCandidates.length} unique words</span><button className={`small-btn ${ollayaCsvOpen ? 'primary' : ''}`} type="button" aria-expanded={ollayaCsvOpen} onClick={() => setOllayaCsvOpen((open) => !open)}>CSV editor · {ollayaRows.length}</button></div></div>
+                {ollayaCsvOpen && <section className="ollaya-csv-editor" aria-label="Editable Ollaya results CSV">
+                  <div className="ollaya-csv-toolbar"><strong>ollaya_results.csv</strong><span>{ollayaCsvStatus}</span></div>
+                  {ollayaCsvError && <p className="candidate-error" role="alert">{ollayaCsvError}</p>}
+                  <div className="ollaya-csv-scroll"><table className="ollaya-csv-table"><thead><tr>{OLLAYA_CSV_COLUMNS.map(([column]) => <th key={column} scope="col">{column}</th>)}</tr></thead><tbody>
+                    {ollayaRows.map((row, rowIndex) => <tr key={`${row._originalWord || row.word}-${rowIndex}`}>
+                      {OLLAYA_CSV_COLUMNS.map(([column]) => <td key={column}>{column === 'is_correct'
+                        ? <select aria-label={`${row.word} is_correct`} value={row[column] || 'N'} onChange={(event) => editOllayaCsvCell(rowIndex, column, event.target.value)} onBlur={(event) => saveOllayaCsvRow(rowIndex, column, event.currentTarget.value)}><option value="N">N</option><option value="Y">Y</option></select>
+                        : <input aria-label={`${row.word} ${column}`} type={column.endsWith('_percent') ? 'number' : 'text'} min={column.endsWith('_percent') ? 0 : undefined} max={column.endsWith('_percent') ? 1 : undefined} step={column.endsWith('_percent') ? 0.01 : undefined} maxLength={column === 'word' ? 256 : undefined} value={row[column] ?? ''} onChange={(event) => editOllayaCsvCell(rowIndex, column, event.target.value)} onBlur={(event) => saveOllayaCsvRow(rowIndex, column, event.currentTarget.value)} />}</td>)}
+                    </tr>)}
+                    {!ollayaRows.length && <tr><td className="ollaya-csv-empty" colSpan={OLLAYA_CSV_COLUMNS.length}>{ollayaCsvStatus === 'Loading CSV…' ? ollayaCsvStatus : 'Results are added here as Ollaya scores each word.'}</td></tr>}
+                  </tbody></table></div>
+                  <p className="ollaya-csv-note">Probabilities use 0–1 values. Correctness starts at N. Each edit is saved to the project CSV.</p>
+                </section>}
                 <label className="dense-toggle"><input type="checkbox" checked={denseText} onChange={(event) => setDenseText(event.target.checked)} /> Dense text view</label>
                 {previewSections.length > 1 && <div className="preview-navigation" role="group" aria-label="Preview section navigation" aria-describedby="preview-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}>
                   <span className="sr-only" id="preview-navigation-help">Use Left or Right Arrow to move between sections, or Home and End to jump to the first and last sections.</span>
@@ -1711,7 +1733,6 @@ export default function App() {
         </div>
       </main>
       {exportPreview && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !exportBusy) setExportPreview(null); }}><section className="modal export-preview-modal" role="dialog" aria-modal="true" aria-labelledby="export-preview-title" aria-describedby="export-preview-description"><h2 id="export-preview-title">Review obfuscated copy</h2><p id="export-preview-description">{exportPreview.outputName} · {exportPreview.matchCount} supported-text occurrences will change. This preview does not modify the original.</p><div className="export-preview-content"><h3>Selected replacements</h3><ul className="export-match-list">{exportPreview.matches.map((match) => <li key={match.candidateId}><span><strong>{match.term}</strong> · {match.occurrenceCount} {match.occurrenceCount === 1 ? 'match' : 'matches'}</span><code>{match.token}</code></li>)}</ul><h3>Output preview · {exportPreview.format}</h3><pre>{exportPreviewText || 'No supported text is present in this preview.'}</pre><h3>Coverage and warnings</h3>{exportPreview.warnings.length ? <ul className="export-warning-list">{exportPreview.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul> : <p>No adapter warnings were reported. This is not a guarantee that all sensitive information was found.</p>}<p>Only adapter-supported editable text is processed. Images/OCR, metadata, macros, embedded binary content, and unhandled text surfaces are not sanitized. The private replacement map remains encrypted in this project and is not included in the output file.</p></div>{exportPreview.requiresAcknowledgement && <label className="export-warning-ack"><input type="checkbox" checked={exportAcknowledged} onChange={(event) => setExportAcknowledged(event.target.checked)} /><span>I reviewed the coverage and placeholder warnings and understand unsupported or unrecognized content may remain.</span></label>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setExportPreview(null)} disabled={exportBusy}>Cancel</button><button className="primary-btn" type="button" onClick={approveProjectExport} disabled={exportBusy || (exportPreview.requiresAcknowledgement && !exportAcknowledged)}>{exportBusy ? 'Saving version…' : 'Approve and save new version'}</button></div></section></div>}
-      {sessionLocked && <div className="modal-backdrop open session-lock-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="session-lock-title"><h2 id="session-lock-title">Local workspace locked</h2><p>Private project data is hidden after 15 minutes without activity. Reopen the project through the OS credential store to continue.</p><div className="modal-actions"><button className="primary-btn" type="button" disabled={unlockBusy || !localToken} onClick={unlockProjectSession}>{unlockBusy ? 'Unlocking…' : 'Unlock project'}</button></div></section></div>}
       {restorePreviewData && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !restoreBusy) setRestorePreviewData(null); }}><section className="modal export-preview-modal" role="dialog" aria-modal="true" aria-labelledby="restore-preview-title"><h2 id="restore-preview-title">Review restored copy</h2><p>{restorePreviewData.outputName} · {restorePreviewData.report.restoredCount} exact occurrences restored. The returned file and project versions remain unchanged until you save.</p><div className="export-preview-content"><h3>Restored output preview · {restorePreviewData.format}</h3><pre>{previewLines(restorePreviewData.preview).join('\n') || 'No supported editable text was found.'}</pre><h3>Adapter coverage</h3>{restorePreviewData.preview.warnings?.length ? <ul className="export-warning-list">{restorePreviewData.preview.warnings.map((warning, index) => <li key={`restore-warning-${index}`}>{warning}</li>)}</ul> : <p>No adapter coverage warnings were reported. This is not proof that all document content was examined.</p>}<h3>Unresolved tokens · {restorePreviewData.report.unresolvedCount}</h3>{restorePreviewData.report.unresolvedTokens.length ? <ul className="export-warning-list">{restorePreviewData.report.unresolvedTokens.map((item) => <li key={`${item.status}-${item.token}`}><code>{item.token}</code> · {item.count} · {item.status === 'altered' ? 'altered, left unchanged' : 'unknown or foreign, left unchanged'}</li>)}{restorePreviewData.report.unresolvedTokensTruncated && <li>Only the first 500 unique token values are listed; unresolved totals include all occurrences.</li>}</ul> : <p>No unresolved placeholder-like strings were detected in supported text.</p>}<p>Only exact intact tokens from this document and selected project version are restored. This report does not certify unsupported package content.</p></div><div className="modal-actions"><button className="text-btn" type="button" disabled={restoreBusy} onClick={() => setRestorePreviewData(null)}>Cancel</button><button className="primary-btn" type="button" disabled={restoreBusy} onClick={commitProjectRestoration}>{restoreBusy ? 'Saving…' : 'Save restored version'}</button></div></section></div>}
       {backupDialog && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !backupBusy) setBackupDialog(null); }}><form className="modal backup-modal" role="dialog" aria-modal="true" aria-labelledby="backup-dialog-title" onSubmit={backupDialog === 'create' ? createPortableBackup : restorePortableBackup}><h2 id="backup-dialog-title">Encrypted portable backup</h2><p>A passphrase-encrypted copy includes project documents, versions, and the private mapping. Keep the passphrase separately; it cannot be recovered.</p><div className="view-switch" role="tablist" aria-label="Backup action"><button type="button" className={backupDialog === 'create' ? 'active' : ''} role="tab" aria-selected={backupDialog === 'create'} onClick={() => setBackupDialog('create')} disabled={!currentProject}>Create</button><button type="button" className={backupDialog === 'restore' ? 'active' : ''} role="tab" aria-selected={backupDialog === 'restore'} onClick={() => setBackupDialog('restore')}>Restore</button></div>{backupDialog === 'restore' && <label className="project-field">Destination project folder<div className="backup-folder-field"><input value={backupDirectory} onChange={(event) => setBackupDirectory(event.target.value)} required placeholder="Choose an empty folder" /><button className="text-btn" type="button" onClick={chooseBackupDirectory} disabled={backupBusy}>Browse</button></div></label>}<label className="project-field">Backup passphrase<input type="password" value={backupPassphrase} onChange={(event) => setBackupPassphrase(event.target.value)} required minLength={12} maxLength={1024} autoComplete="new-password" placeholder="At least 12 characters" /></label><p className="backup-note">{backupDialog === 'create' ? 'Downloads a .blotbackup file protected by a memory-hard passphrase key.' : 'Choose the .blotbackup file after selecting an empty destination folder.'}</p><div className="modal-actions"><button className="text-btn" type="button" disabled={backupBusy} onClick={() => setBackupDialog(null)}>Cancel</button><button className="primary-btn" type="submit" disabled={backupBusy || !localToken || (backupDialog === 'create' && !currentProject)}>{backupBusy ? 'Working…' : backupDialog === 'create' ? 'Create encrypted backup' : 'Choose backup & restore'}</button></div></form></div>}
       {termContextMenu?.fileName === activeName && view === 'preview' && <div className="term-context-menu" data-term-context-menu role="menu" aria-label="Highlighted word actions" style={{ left: termContextMenu.x, top: termContextMenu.y }}><button type="button" role="menuitem" onClick={() => applyTermDecision(termContextMenu.target, 'suggested')}>Reset</button><button type="button" role="menuitem" onClick={() => applyTermDecision(termContextMenu.target, 'included')}>Include</button><button type="button" role="menuitem" onClick={() => applyTermDecision(termContextMenu.target, 'excluded')}>Exclude</button></div>}

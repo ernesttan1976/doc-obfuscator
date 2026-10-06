@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
+import math
 import os
 import re
 import secrets
@@ -62,6 +65,61 @@ SUPPORTED_DOCUMENT_EXTENSIONS = {".docx", ".pptx", ".txt", ".md", ".csv", ".xlsx
 TOKEN_LIKE_TEXT = re.compile(r"\[\[T_[^\]\r\n]{1,128}\]\]", re.IGNORECASE)
 VALID_PLACEHOLDER = re.compile(r"\[\[T_[A-Za-z0-9_-]{3,}\]\]", re.IGNORECASE)
 MAX_RESTORE_REPORT_TOKENS = 500
+OLLAYA_RESULTS_NAME = "ollaya_results.csv"
+OLLAYA_RESULTS_COLUMNS = (
+    "word",
+    "is_identifier_percent",
+    "is_operationally_significant_percent",
+    "is_common_word_percent",
+    "is_correct",
+)
+
+
+def _normalize_ollaya_result_row(row: dict[str, object]) -> dict[str, object]:
+    word = str(row.get("word", "")).strip()
+    if not word or len(word) > 256:
+        raise ProjectError("An Ollaya CSV word must contain 1 to 256 characters.")
+
+    normalized: dict[str, object] = {"word": word}
+    for column in OLLAYA_RESULTS_COLUMNS[1:4]:
+        value = row.get(column)
+        if value in (None, ""):
+            normalized[column] = ""
+            continue
+        if isinstance(value, bool):
+            raise ProjectError(f"{column} must be a probability from 0 to 1.")
+        try:
+            probability = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ProjectError(f"{column} must be a probability from 0 to 1.") from exc
+        if not math.isfinite(probability) or not 0 <= probability <= 1:
+            raise ProjectError(f"{column} must be a probability from 0 to 1.")
+        normalized[column] = probability
+
+    correctness = str(row.get("is_correct", "N") or "N").strip().upper()
+    if correctness not in {"Y", "N"}:
+        raise ProjectError("is_correct must be Y or N.")
+    normalized["is_correct"] = correctness
+    return normalized
+
+
+def _ollaya_csv_row(candidate: dict[str, object]) -> dict[str, object]:
+    signals = candidate.get("signals")
+    signals = signals if isinstance(signals, dict) else {}
+    columns = {
+        "is_identifier_percent": "isIdentifier",
+        "is_operationally_significant_percent": "isOperationallySignificant",
+        "is_common_word_percent": "isCommonWord",
+    }
+    return {
+        "word": str(candidate.get("term", "")),
+        **{
+            column: signal.get("probabilityYes", "")
+            for column, signal_name in columns.items()
+            if isinstance((signal := signals.get(signal_name)), dict)
+        },
+        "is_correct": "N",
+    }
 
 
 class ProjectError(Exception):
@@ -116,6 +174,78 @@ class ProjectService:
         self._export_lock = threading.RLock()
         self._restore_plans: dict[str, dict[str, Any]] = {}
         self._restore_lock = threading.RLock()
+        self._ollaya_results_lock = threading.RLock()
+        self._ollaya_results_cache: dict[str, dict[str, dict[str, object]]] = {}
+
+    def get_ollaya_results(self, directory: str | Path) -> list[dict[str, object]]:
+        root = self._validate_directory(directory)
+        self.open(root)
+        with self._ollaya_results_lock:
+            rows = self._read_ollaya_results(root)
+            self._ollaya_results_cache[str(root)] = {
+                str(row["word"]).casefold(): row for row in rows
+            }
+            return rows
+
+    def update_ollaya_result(
+        self,
+        directory: str | Path,
+        row: dict[str, object],
+        previous_word: str | None = None,
+    ) -> dict[str, object]:
+        root = self._validate_directory(directory)
+        self.open(root)
+        with self._ollaya_results_lock:
+            rows = self._load_ollaya_results_cache(root)
+            clean_row = _normalize_ollaya_result_row(row)
+            if previous_word and previous_word.casefold() != str(clean_row["word"]).casefold():
+                rows.pop(previous_word.casefold(), None)
+            rows[str(clean_row["word"]).casefold()] = clean_row
+            self._write_ollaya_results(root, rows)
+            return dict(clean_row)
+
+    def _record_ollaya_result(self, root: Path, row: dict[str, object]) -> None:
+        clean_row = _normalize_ollaya_result_row(row)
+        with self._ollaya_results_lock:
+            rows = self._load_ollaya_results_cache(root)
+            key = str(clean_row["word"]).casefold()
+            existing = rows.get(key)
+            if existing is not None:
+                clean_row["is_correct"] = existing["is_correct"]
+            rows[key] = clean_row
+            self._write_ollaya_results(root, rows)
+
+    def _load_ollaya_results_cache(self, root: Path) -> dict[str, dict[str, object]]:
+        key = str(root)
+        if key not in self._ollaya_results_cache:
+            self._ollaya_results_cache[key] = {
+                str(row["word"]).casefold(): row for row in self._read_ollaya_results(root)
+            }
+        return self._ollaya_results_cache[key]
+
+    @staticmethod
+    def _read_ollaya_results(root: Path) -> list[dict[str, object]]:
+        path = root / OLLAYA_RESULTS_NAME
+        if not path.exists():
+            return []
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as file:
+                reader = csv.DictReader(file)
+                if tuple(reader.fieldnames or ()) != OLLAYA_RESULTS_COLUMNS:
+                    raise ProjectError("The Ollaya results CSV has an unexpected header.")
+                rows = [_normalize_ollaya_result_row(row) for row in reader]
+        except (OSError, csv.Error, UnicodeError, ValueError) as exc:
+            raise ProjectError("The Ollaya results CSV could not be read.") from exc
+        unique_rows = {str(row["word"]).casefold(): row for row in rows}
+        return sorted(unique_rows.values(), key=lambda row: str(row["word"]).casefold())
+
+    @staticmethod
+    def _write_ollaya_results(root: Path, rows: dict[str, dict[str, object]]) -> None:
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=OLLAYA_RESULTS_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(sorted(rows.values(), key=lambda row: str(row["word"]).casefold()))
+        atomic_write_private(root / OLLAYA_RESULTS_NAME, output.getvalue().encode("utf-8"))
 
     def create(self, directory: str | Path, name: str) -> ProjectSummary:
         root = self._validate_directory(directory)
@@ -1054,6 +1184,7 @@ class ProjectService:
                             candidate.update(unavailable_score())
                             ollaya_failures += 1
                         apply_common_word_filter(candidate)
+                        self._record_ollaya_result(root, _ollaya_csv_row(candidate))
                         if on_candidate is not None:
                             on_candidate(dict(candidate))
         else:

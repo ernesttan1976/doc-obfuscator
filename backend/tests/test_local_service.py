@@ -1,10 +1,10 @@
+import csv
 import io
 import json
 import os
 import re
 import secrets
 import sqlite3
-import time
 import zipfile
 from types import SimpleNamespace
 
@@ -104,12 +104,11 @@ async def test_bootstrap_token_is_uncached_and_required_for_private_api(tmp_path
     assert session.json() == {
         "status": "ready",
         "storage": "os-credential-store",
-        "idleTimeoutSeconds": 900,
     }
 
 
 @pytest.mark.anyio
-async def test_idle_project_session_locks_private_api_until_os_store_unlock(tmp_path):
+async def test_project_session_has_no_idle_timeout(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     app, client_context = local_client(tmp_path, MemoryKeyStore())
@@ -121,16 +120,50 @@ async def test_idle_project_session_locks_private_api_until_os_store_unlock(tmp_
             headers=headers,
         )
         assert created.status_code == 201
-        app.state.session_last_activity = time.monotonic() - 901
-        locked = await client.get("/api/session", headers=headers)
-        denied = await client.post("/api/projects/open", json={"directory": str(root)}, headers=headers)
-        unlocked = await client.post("/api/session/unlock", json={"directory": str(root)}, headers=headers)
         reopened = await client.post("/api/projects/open", json={"directory": str(root)}, headers=headers)
+        session = await client.get("/api/session", headers=headers)
 
-    assert locked.status_code == denied.status_code == 423
-    assert unlocked.status_code == 200
-    assert unlocked.json()["storage"] == "os-credential-store"
     assert reopened.status_code == 200
+    assert session.json() == {"status": "ready", "storage": "os-credential-store"}
+
+
+@pytest.mark.anyio
+async def test_ollaya_results_csv_can_be_loaded_and_edited(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    app, client_context = local_client(tmp_path, MemoryKeyStore())
+    row = {
+        "word": "Cedar",
+        "is_identifier_percent": 0.6,
+        "is_operationally_significant_percent": 0.7,
+        "is_common_word_percent": 0.2,
+        "is_correct": "N",
+    }
+    async with client_context as client:
+        headers = {"X-Local-App-Token": app.state.local_token}
+        await client.post("/api/projects", json={"name": "Project", "directory": str(root)}, headers=headers)
+        empty = await client.get("/api/projects/ollaya-results", params={"directory": str(root)}, headers=headers)
+        saved = await client.put(
+            "/api/projects/ollaya-results/row",
+            json={"directory": str(root), "row": row},
+            headers=headers,
+        )
+        edited = await client.put(
+            "/api/projects/ollaya-results/row",
+            json={"directory": str(root), "previous_word": "Cedar", "row": {**row, "is_correct": "Y"}},
+            headers=headers,
+        )
+        loaded = await client.get("/api/projects/ollaya-results", params={"directory": str(root)}, headers=headers)
+
+    assert empty.status_code == 200
+    assert empty.json() == {"filename": "ollaya_results.csv", "rows": []}
+    assert saved.json()["row"]["is_correct"] == "N"
+    assert edited.json()["row"]["is_correct"] == "Y"
+    assert loaded.json()["rows"] == [{**row, "is_correct": "Y"}]
+    assert (root / "ollaya_results.csv").read_text(encoding="utf-8").splitlines() == [
+        "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,is_correct",
+        "Cedar,0.6,0.7,0.2,Y",
+    ]
 
 
 @pytest.mark.anyio
@@ -497,6 +530,11 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
         )
         events = [json.loads(line) for line in streamed.text.splitlines()]
         streamed_candidates = [event["candidate"] for event in events if event["type"] == "candidate"]
+        csv_response = await client.get(
+            "/api/projects/ollaya-results",
+            params={"directory": str(root)},
+            headers=headers,
+        )
         assert streamed.status_code == 200
         assert streamed.headers["content-type"].startswith("application/x-ndjson")
         assert streamed_candidates
@@ -505,6 +543,10 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
         }
         assert any(candidate["scoreStatus"] == "queued" for candidate in streamed_candidates)
         assert any(candidate["scoreStatus"] == "unavailable" for candidate in streamed_candidates)
+        csv_rows = csv_response.json()["rows"]
+        csv_words = {row["word"] for row in csv_rows}
+        assert {candidate["term"] for candidate in streamed_candidates if candidate["scoreStatus"] != "queued"} <= csv_words
+        assert all(row["is_correct"] == "N" for row in csv_rows)
         assert events[-1]["type"] == "complete"
         assert {candidate["term"] for candidate in streamed_candidates} <= {
             candidate["term"] for candidate in events[-1]["data"]["candidates"]
@@ -991,6 +1033,66 @@ def test_confirmed_group_decisions_propagate_without_overriding_a_pinned_exclusi
     assert excluded_peer["decision"] == "excluded"
     assert excluded_peer["pinned"] is True
     assert all(item["decision"] == "excluded" for item in after_exclude["candidates"] if item["id"] in group["candidateIds"])
+
+
+def test_ollaya_results_are_written_before_each_scored_candidate_is_published(tmp_path):
+    class FixedScorer:
+        def score_candidate(self, features):
+            return {
+                "redactionConfidence": 0.7,
+                "reviewPriority": 6,
+                "scoringModel": "von:1.1",
+                "signals": {
+                    "isIdentifier": {"answer": "Yes", "probabilityYes": 0.6},
+                    "isOperationallySignificant": {"answer": "Yes", "probabilityYes": 0.7},
+                    "isCommonWord": {"answer": "No", "probabilityYes": 0.2},
+                },
+                "commonWordProbability": 0.2,
+                "reasons": [],
+                "scoreStatus": "complete",
+            }
+
+    root = tmp_path / "project"
+    source = tmp_path / "brief.txt"
+    root.mkdir()
+    source.write_text("Cedar briefing notes", encoding="utf-8")
+    service = ProjectService(MemoryKeyStore(), ollaya_scorer=FixedScorer())
+    service.create(root, "Project")
+    imported = service.import_documents(root, [source])[0]
+    published_words = []
+
+    def on_candidate(candidate):
+        if candidate["scoreStatus"] == "queued":
+            return
+        with (root / "ollaya_results.csv").open(encoding="utf-8", newline="") as csv_file:
+            rows = list(csv.DictReader(csv_file))
+        assert candidate["term"] in {row["word"] for row in rows}
+        published_words.append(candidate["term"])
+
+    service.analyze_document_candidates(root, imported.document_id, on_candidate=on_candidate)
+    first_word = published_words[0]
+    service.update_ollaya_result(
+        root,
+        {
+            "word": first_word,
+            "is_identifier_percent": 0.6,
+            "is_operationally_significant_percent": 0.7,
+            "is_common_word_percent": 0.2,
+            "is_correct": "Y",
+        },
+    )
+    service.analyze_document_candidates(root, imported.document_id)
+
+    rows = {row["word"]: row for row in service.get_ollaya_results(root)}
+    assert set(published_words) == set(rows)
+    assert rows[first_word] == {
+        "word": first_word,
+        "is_identifier_percent": 0.6,
+        "is_operationally_significant_percent": 0.7,
+        "is_common_word_percent": 0.2,
+        "is_correct": "Y",
+    }
+    assert all(row["is_correct"] == "N" for word, row in rows.items() if word != first_word)
 
 
 @pytest.mark.anyio
