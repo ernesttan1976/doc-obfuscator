@@ -5,6 +5,7 @@ import {
   getCandidateDecisionCounts,
   getCandidatesMatchingSignal,
   getCandidatesNotSelectedAtLevel,
+  getReviewCandidates,
   getVisibleCandidates,
   isCandidateAutoSuggested,
   upsertCandidate,
@@ -36,6 +37,15 @@ test('Include and Exclude decisions do not bypass the selected priority level', 
     'email', 'priority-five', 'name', 'pinned-in',
   ]);
   assert.deepEqual(getVisibleCandidates(candidates, 1), []);
+});
+
+test('automatically excluded candidates are omitted from review while pinned exclusions remain manageable', () => {
+  const review = getReviewCandidates([
+    { id: 'auto-excluded', decision: 'excluded', pinned: false },
+    { id: 'manual-excluded', decision: 'excluded', pinned: true },
+    { id: 'suggested', decision: 'suggested' },
+  ]);
+  assert.deepEqual(review.map(({ id }) => id), ['manual-excluded', 'suggested']);
 });
 
 test('candidates with Ollaya review priorities are ordered highest review priority first', () => {

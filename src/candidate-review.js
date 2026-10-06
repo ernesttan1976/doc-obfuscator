@@ -6,6 +6,10 @@ export function getVisibleCandidates(candidates, level) {
   return [...scored, ...unscored];
 }
 
+export function getReviewCandidates(candidates) {
+  return candidates.filter((candidate) => candidate.decision !== 'excluded' || candidate.pinned);
+}
+
 export function upsertCandidate(candidates, candidate) {
   const index = candidates.findIndex((item) => item.id === candidate.id);
   if (index < 0) return [...candidates, candidate];
