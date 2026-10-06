@@ -3,9 +3,11 @@ import subprocess
 
 import pytest
 
+from backend.app.document_adapters import DocumentCell, ParsedDocument, WorksheetContent
 from backend.app.prompt_iteration import (
     CSV_COLUMNS,
     PromptIterationError,
+    _document_to_plain_text,
     _revise_prompt_locally,
     iterate_prompt_for_file,
 )
@@ -72,6 +74,32 @@ def test_iterate_prompt_for_file_reviews_corrects_and_runs_revised_prompt(tmp_pa
     assert review[0]["is_identifier_correct"] == "No"
     assert review[0]["is_common_word_correct"] == "Yes"
     assert review[0]["incorrect_signals"] == ""
+
+
+@pytest.mark.parametrize(
+    ("parsed", "expected"),
+    [
+        (
+            ParsedDocument(format="DOCX", encoding="xml-utf-8", source=b"", text="Alpha\nBeta"),
+            "Alpha\nBeta",
+        ),
+        (
+            ParsedDocument(format="PPTX", encoding="xml-utf-8", source=b"", text="Slide one\nSlide two"),
+            "Slide one\nSlide two",
+        ),
+        (
+            ParsedDocument(
+                format="XLSX",
+                encoding="xml-utf-8",
+                source=b"",
+                sheets=(WorksheetContent("Data", (DocumentCell("A1", "Alpha"), DocumentCell("B1", "Beta"))),),
+            ),
+            "Alpha\nBeta",
+        ),
+    ],
+)
+def test_supported_office_content_is_flattened_to_plain_text(parsed, expected):
+    assert _document_to_plain_text(parsed) == expected
 
 
 def test_iterate_prompt_for_file_accepts_correct_classification_without_rewriting(tmp_path):

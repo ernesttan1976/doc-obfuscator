@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .candidate_engine import CandidateBlock, blocks_for_document
-from .document_adapters import parse_document
+from .document_adapters import ParsedDocument, parse_document
 from .ollaya_scoring import SCORING_MODEL, validate_ollaya_response
 
 INITIAL_PROMPT = (
@@ -176,6 +176,12 @@ def _extract_unique_words(blocks: Sequence[CandidateBlock]) -> list[dict[str, st
                 "example_id": normalized,
             }
     return list(words.values())
+
+
+def _document_to_plain_text(parsed: ParsedDocument) -> str:
+    """Flatten adapter-extracted editable text to plain text before tokenization."""
+    blocks = blocks_for_document(parsed)
+    return "\n".join(block.text for block in blocks if block.text.strip())
 
 
 def _get_yes_probability(scores: dict[str, float], signal: str) -> float:
@@ -352,7 +358,8 @@ def iterate_prompt_for_file(
         parsed = parse_document(source_path.read_bytes(), source_path.suffix)
     except OSError as exc:
         raise PromptIterationError(f"Could not read input file: {source_path}") from exc
-    word_rows = _extract_unique_words(blocks_for_document(parsed))
+    plain_text = _document_to_plain_text(parsed)
+    word_rows = _extract_unique_words((CandidateBlock("plain-text", plain_text),))
     if not word_rows:
         raise PromptIterationError("The input file contains no words to classify.")
 
@@ -369,6 +376,8 @@ def iterate_prompt_for_file(
     revise_prompt = prompt_reviser or _revise_prompt_locally
     read_input = input_fn or input
     write_output = output_fn or print
+    if parsed.warnings:
+        write_output("Document-to-text conversion warnings: " + "; ".join(parsed.warnings))
     prompt = INITIAL_PROMPT
     gold_labels: dict[str, dict[str, bool]] = {}
     source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
@@ -426,6 +435,10 @@ def iterate_prompt_for_file(
             "model": getattr(scorer, "model", SCORING_MODEL),
             "threshold_percent": 50,
             "source_sha256": source_hash,
+            "source_format": parsed.format,
+            "plain_text_character_count": len(plain_text),
+            "conversion_warnings": list(parsed.warnings),
+            "unsupported_part_count": len(parsed.unsupported_parts),
             "unique_word_count": len(word_rows),
         }
         (run_directory / f"{run_id}.json").write_text(

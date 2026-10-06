@@ -32,10 +32,11 @@ Use stable, reproducible run IDs: `run001`, `run002`, and so on. Never overwrite
 
 ## Stage 1 — Extract unique words
 
-1. Extract words from the selected input using a documented tokenizer.
-2. Deduplicate using a stable normalized form (at minimum, Unicode normalization and case-folding); preserve a representative original spelling for display and CSV output.
-3. Retain the relevant occurrence context locally for scoring and human review. If a spelling has materially different uses, keep separate word/context examples rather than collapsing distinct meanings into one judgment.
-4. Save the extracted evaluation input with its run ID so each prompt version scores identical examples.
+1. Convert supported editable document content to plain text locally before tokenization. Use the document adapters for DOCX, PPTX, XLSX, CSV and text-based formats; do not classify unsupported Office parts or imply that image/OCR text was extracted.
+2. Extract words from the converted plain text using a documented tokenizer.
+3. Deduplicate using a stable normalized form (at minimum, Unicode normalization and case-folding); preserve a representative original spelling for display and CSV output.
+4. Retain the relevant occurrence context locally for scoring and human review. If a spelling has materially different uses, keep separate word/context examples rather than collapsing distinct meanings into one judgment.
+5. Save the extracted evaluation input with its run ID so each prompt version scores identical examples.
 
 ## Stage 2 — Score each word and write the CSV
 
