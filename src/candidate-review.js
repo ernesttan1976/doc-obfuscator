@@ -18,6 +18,7 @@ export function isCandidateAutoSuggested(candidate) {
   if (candidate.decision === 'excluded') return false;
   if (candidate.pinned) return candidate.decision === 'included';
   if (candidate.redactionConfidence != null) return true;
+  if (candidate.category === 'WORD') return false;
   return candidate.scoreStatus !== 'complete';
 }
 

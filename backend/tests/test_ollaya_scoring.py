@@ -54,10 +54,10 @@ def test_signal_validation_confidence_and_automatic_suggestion_rules():
             "is_identifier": {
                 "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.83, "No": 0.17}
             },
-            "has_operational_significance": {
+            "is_operationally_significant": {
                 "type": "choice", "choice": "No", "probabilities": {"Yes": 0.23, "No": 0.77}
             },
-            "is_not_made_of_common_words": {
+            "is_common_word": {
                 "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.99, "No": 0.01}
             },
         },
@@ -67,17 +67,19 @@ def test_signal_validation_confidence_and_automatic_suggestion_rules():
     assert result["redactionConfidence"] == 0.83
     assert result["reviewPriority"] == 4
     assert result["scoreStatus"] == "complete"
-    assert result["notCommonWordsProbability"] == 0.99
+    assert result["commonWordProbability"] == 0.99
     assert should_auto_suggest({**result, "level": 10, "decision": "suggested"}) is True
 
     no_result = score_result_from_signals({
         "isIdentifier": {"answer": "No", "probabilityYes": 0.2},
-        "hasOperationalSignificance": {"answer": "No", "probabilityYes": 0.1},
-        "isNotMadeOfCommonWords": {"answer": "No", "probabilityYes": 0.4},
+        "isOperationallySignificant": {"answer": "No", "probabilityYes": 0.1},
+        "isCommonWord": {"answer": "No", "probabilityYes": 0.4},
     })
     assert no_result["redactionConfidence"] is None
     assert no_result["reviewPriority"] is None
     assert should_auto_suggest({**no_result, "level": 2, "decision": "suggested"}) is False
+    assert should_auto_suggest({"category": "WORD", "level": 8, "scoreStatus": "unavailable"}) is False
+    assert should_auto_suggest({"category": "WORD", "level": 8, "redactionConfidence": 0.7}) is True
     assert should_auto_suggest({**no_result, "level": 2, "decision": "included", "pinned": True}) is True
     assert should_auto_suggest({**result, "decision": "excluded", "pinned": True}) is False
 
@@ -125,10 +127,10 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
                     "is_identifier": {
                         "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.7, "No": 0.3}
                     },
-                    "has_operational_significance": {
+                    "is_operationally_significant": {
                         "type": "choice", "choice": "No", "probabilities": {"Yes": 0.3, "No": 0.7}
                     },
-                    "is_not_made_of_common_words": {
+                    "is_common_word": {
                         "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.7, "No": 0.3}
                     },
                 },
@@ -144,7 +146,7 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
     assert captured["command"][:3] == ["/usr/local/bin/ollaya", "run", "von:1.1"]
     questions_arg = captured["command"][captured["command"].index("--questions") + 1]
     assert set(json.loads(questions_arg)) == {
-        "is_identifier", "has_operational_significance", "is_not_made_of_common_words"
+        "is_identifier", "is_operationally_significant", "is_common_word"
     }
     assert "Private Project" not in " ".join(captured["command"])
     assert json.loads(captured["input"]) == {
@@ -185,10 +187,10 @@ def test_local_cli_caches_successful_scores_for_identical_inputs(caplog):
                     "is_identifier": {
                         "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.8, "No": 0.2}
                     },
-                    "has_operational_significance": {
+                    "is_operationally_significant": {
                         "type": "choice", "choice": "No", "probabilities": {"Yes": 0.2, "No": 0.8}
                     },
-                    "is_not_made_of_common_words": {
+                    "is_common_word": {
                         "type": "choice", "choice": "No", "probabilities": {"Yes": 0.2, "No": 0.8}
                     },
                 },
@@ -254,8 +256,8 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
             self.payloads.append(features)
             return score_result_from_signals({
                 "isIdentifier": {"answer": "No", "probabilityYes": 0.1},
-                "hasOperationalSignificance": {"answer": "No", "probabilityYes": 0.2},
-                "isNotMadeOfCommonWords": {"answer": "Yes", "probabilityYes": 0.8},
+                "isOperationallySignificant": {"answer": "No", "probabilityYes": 0.2},
+                "isCommonWord": {"answer": "Yes", "probabilityYes": 0.8},
             })
 
     project_dir = tmp_path / "workspace"
@@ -267,56 +269,66 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
     service.create(project_dir, "Test workspace")
     document = service.import_documents(project_dir, [source])[0]
 
-    analysis = service.analyze_document_candidates(project_dir, document.document_id, ["Alex Tan"])
+    streamed = []
+    analysis = service.analyze_document_candidates(
+        project_dir,
+        document.document_id,
+        ["Alex Tan"],
+        on_candidate=streamed.append,
+    )
     by_term = {candidate["term"]: candidate for candidate in analysis["candidates"]}
     preview = service.preview_obfuscation(project_dir, document.document_id, 10)
 
     assert len(scorer.payloads) == len(analysis["candidates"])
+    assert len(streamed) == len(analysis["candidates"]) * 2
+    assert all(candidate["scoreStatus"] == "queued" for candidate in streamed[:len(analysis["candidates"])])
+    assert all(candidate["scoreStatus"] == "complete" for candidate in streamed[len(analysis["candidates"]):])
     assert analysis["ollayaStatus"] == "ready"
     assert by_term["Alex Tan"]["decision"] == "included"
     assert by_term["Alex Tan"]["pinned"] is True
-    assert by_term["Jordan Lee"]["decision"] == "excluded"
-    assert by_term["Jordan Lee"]["notCommonWordsProbability"] == 0.8
-    assert by_term["Jordan Lee"]["scoreStatus"] == "complete"
-    assert by_term["Jordan Lee"]["redactionConfidence"] is None
+    assert by_term["Jordan"]["decision"] == "suggested"
+    assert by_term["Jordan"]["commonWordProbability"] == 0.8
+    assert by_term["Jordan"]["scoreStatus"] == "complete"
+    assert by_term["Jordan"]["redactionConfidence"] is None
     assert [match["term"] for match in preview["matches"]] == ["Alex Tan"]
     encrypted_state = (project_dir / ".blot" / "private-state.enc").read_bytes()
     assert b"Alex Tan met Jordan Lee on Monday" not in encrypted_state
     assert b'"context"' not in encrypted_state
 
 
-def test_common_word_filter_excludes_above_half_and_fails_closed_but_preserves_pinned_and_structured_terms():
-    above_threshold = {
-        "category": "CAPITALIZED_PHRASE",
-        "notCommonWordsProbability": 0.5001,
+def test_common_word_signal_is_advisory_and_identifier_or_operational_yes_overrides_it():
+    common = {
         "decision": "suggested",
+        "signals": {"isCommonWord": {"answer": "Yes", "probabilityYes": 0.9}},
     }
-    apply_common_word_filter(above_threshold)
-    assert above_threshold["decision"] == "excluded"
-    assert above_threshold["commonWordFilterStatus"] == "excluded"
+    apply_common_word_filter(common)
+    assert common["decision"] == "suggested"
+    assert common["commonWordFilterStatus"] == "common"
+    assert common["commonWordOverride"] is False
 
-    at_threshold = {
-        "category": "NER_ENTITY",
-        "notCommonWordsProbability": 0.5,
+    identified = {
         "decision": "suggested",
+        "signals": {
+            "isCommonWord": {"answer": "Yes", "probabilityYes": 0.9},
+            "isIdentifier": {"answer": "Yes", "probabilityYes": 0.8},
+        },
     }
-    apply_common_word_filter(at_threshold)
-    assert at_threshold["decision"] == "suggested"
+    apply_common_word_filter(identified)
+    assert identified["decision"] == "suggested"
+    assert identified["commonWordFilterStatus"] == "overridden"
+    assert identified["commonWordOverride"] is True
 
-    unavailable = {"category": "CAPITALIZED_PHRASE", "decision": "suggested"}
+    operational = {
+        "decision": "suggested",
+        "signals": {
+            "isCommonWord": {"answer": "Yes", "probabilityYes": 0.9},
+            "isOperationallySignificant": {"answer": "Yes", "probabilityYes": 0.8},
+        },
+    }
+    apply_common_word_filter(operational)
+    assert operational["commonWordOverride"] is True
+
+    unavailable = {"decision": "suggested", "signals": {}}
     apply_common_word_filter(unavailable)
-    assert unavailable["decision"] == "excluded"
+    assert unavailable["decision"] == "suggested"
     assert unavailable["commonWordFilterStatus"] == "unavailable"
-
-    pinned = {
-        "category": "CAPITALIZED_PHRASE",
-        "notCommonWordsProbability": 0.9,
-        "decision": "included",
-        "pinned": True,
-    }
-    apply_common_word_filter(pinned)
-    assert pinned["decision"] == "included"
-
-    email = {"category": "EMAIL", "notCommonWordsProbability": 0.9, "decision": "suggested"}
-    apply_common_word_filter(email)
-    assert email["decision"] == "suggested"

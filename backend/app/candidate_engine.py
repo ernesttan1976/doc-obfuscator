@@ -15,6 +15,7 @@ MAX_OCCURRENCES_PER_CANDIDATE = 2_000
 # Priorities run from 2 (most sensitive) to 10 (least sensitive). These are
 # heuristics for filtering, not a guarantee that every occurrence was found.
 CANDIDATE_PRIORITY_LEVELS = {
+    "WORD": 8,
     "EMAIL": 2,
     "PHONE": 3,
     "DATE": 10,
@@ -56,6 +57,7 @@ _NUMERIC_DATE = re.compile(
 )
 _IDENTIFIER = re.compile(r"\b(?:[A-Z]{2,}[\w]*[-_/][A-Z0-9][A-Z0-9_-]*|[A-Z]{2,}\d{2,})\b")
 _CAPITALIZED_TOKEN = re.compile(r"(?<![\w])(?:[A-Z][a-z]+(?:[’'-][A-Z]?[a-z]+)*|[A-Z]\.)(?![\w])")
+_WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _COMMON_SENTENCE_STARTERS = {"a", "an", "at", "contact", "for", "from", "in", "on", "owner", "please", "reference", "the", "to"}
 @dataclass(frozen=True)
 class CandidateBlock:
@@ -278,6 +280,96 @@ def analyze_candidates(
         if len(nodes) >= MAX_CANDIDATES_PER_VERSION:
             break
 
+    return nodes
+
+
+def extract_word_candidates(
+    blocks: Iterable[CandidateBlock],
+    document_id: str,
+    version_id: str,
+    existing_nodes: Iterable[dict[str, object]] = (),
+    manual_terms: Iterable[str] = (),
+) -> list[dict[str, object]]:
+    """Collect one candidate per unique document word, retaining all its locations."""
+    blocks = tuple(blocks)
+    preserved = {
+        str(node.get("term", "")).casefold(): node
+        for node in existing_nodes
+        if node.get("documentId") == document_id and node.get("versionId") == version_id
+    }
+    collected: dict[str, dict[str, object]] = {}
+    category_counts: dict[str, int] = {}
+
+    for block in blocks:
+        for match in _WORD.finditer(block.text):
+            term = match.group(0)
+            if len(term) > 256:
+                continue
+            _add_occurrence(
+                collected,
+                category_counts,
+                term,
+                "WORD",
+                block.location,
+                match.start(),
+                match.end(),
+            )
+
+    for term in manual_terms:
+        clean_term = " ".join(term.split())
+        if not clean_term or len(clean_term) > 256 or any(ord(char) < 32 for char in clean_term):
+            raise CandidateError("Manually selected phrases must contain 1–256 printable characters.")
+        found = False
+        for block in blocks:
+            for match in re.finditer(re.escape(clean_term), block.text, re.IGNORECASE):
+                found = True
+                _add_occurrence(
+                    collected,
+                    category_counts,
+                    match.group(0),
+                    "MANUAL",
+                    block.location,
+                    match.start(),
+                    match.end(),
+                )
+        if not found:
+            raise CandidateError("The selected phrase is not present in supported text for this version.")
+
+    nodes: list[dict[str, object]] = []
+    ordered_records = sorted(
+        collected.items(),
+        key=lambda item: (
+            not bool(item[1]["manual"]),
+            _category_priority(str(item[1]["category"])),
+            item[0],
+        ),
+    )
+    for normalized_term, record in ordered_records:
+        term = str(record["term"])
+        occurrences = record["occurrences"]
+        assert isinstance(occurrences, list)
+        nodes.append(
+            {
+                "id": _candidate_id(version_id, normalized_term),
+                "documentId": document_id,
+                "versionId": version_id,
+                "term": term,
+                "category": record["category"],
+                "level": _priority_level(str(record["category"]), set(), 0.0),
+                "source": "manual" if record["manual"] else "word",
+                "nerLabels": [],
+                "nerScore": 0.0,
+                "occurrences": occurrences[:MAX_OCCURRENCES_PER_CANDIDATE],
+                "occurrenceCount": record["occurrenceCount"],
+                "occurrencesTruncated": record["occurrenceCount"] > MAX_OCCURRENCES_PER_CANDIDATE,
+                "decision": preserved.get(normalized_term, {}).get(
+                    "decision", "included" if record["manual"] else "suggested"
+                ),
+                "pinned": bool(preserved.get(normalized_term, {}).get("pinned", record["manual"])),
+            }
+        )
+        if len(nodes) >= MAX_CANDIDATES_PER_VERSION:
+            break
     return nodes
 
 

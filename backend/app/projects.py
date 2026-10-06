@@ -21,9 +21,9 @@ from typing import Any
 from .candidate_engine import (
     CandidateBlock,
     CandidateError,
-    analyze_candidates,
     blocks_for_document,
     decide_candidate,
+    extract_word_candidates,
 )
 from .document_adapters import (
     PLACEHOLDER_LIKE_TEXT,
@@ -1008,31 +1008,20 @@ class ProjectService:
             str(node["term"]) for node in existing_nodes if node.get("source") == "manual"
         ]
         blocks = blocks_for_document(parsed)
-        ner_warning = None
-        ner_truncated = False
-
-        def iter_ner_entities():
-            nonlocal ner_warning, ner_truncated
-            try:
-                ner_entities, ner_truncated = (
-                    self.entity_extractor(blocks) if self.entity_extractor else ([], False)
-                )
-            except ModelManagerError:
-                ner_entities = []
-                ner_warning = "The local NER model could not run; deterministic candidate discovery continued."
-            yield from ner_entities
-
-        candidates = analyze_candidates(
+        candidates = extract_word_candidates(
             blocks,
             document_id,
             version_id,
             existing_nodes,
             [*retained_manual_terms, *(manual_terms or [])],
-            ner_entities=iter_ner_entities(),
-            on_candidate=on_candidate,
         )
         ollaya_failures = 0
         ollaya_scored_count = 0
+        for candidate in candidates:
+            candidate["scoreStatus"] = "queued"
+            if on_candidate is not None:
+                on_candidate(dict(candidate))
+
         if self.ollaya_scorer is not None:
             for candidate in candidates:
                 try:
@@ -1041,6 +1030,9 @@ class ProjectService:
                         blocks,
                     )
                     candidate.update(self.ollaya_scorer.score_candidate(features))
+                    review_priority = candidate.get("reviewPriority")
+                    if isinstance(review_priority, int):
+                        candidate["level"] = max(2, min(10, review_priority))
                     if candidate.get("scoreStatus") in {"complete", "partial"}:
                         ollaya_scored_count += 1
                         if candidate.get("scoreStatus") == "partial":
@@ -1051,20 +1043,39 @@ class ProjectService:
                     # Scoring is advisory and must never block document analysis.
                     candidate.update(unavailable_score())
                     ollaya_failures += 1
+                apply_common_word_filter(candidate)
+                if on_candidate is not None:
+                    on_candidate(dict(candidate))
         else:
             ollaya_failures = len(candidates)
             for candidate in candidates:
                 candidate.update(unavailable_score())
-        for candidate in candidates:
-            apply_common_word_filter(candidate)
+                apply_common_word_filter(candidate)
+                if on_candidate is not None:
+                    on_candidate(dict(candidate))
         old_ids = {node["id"] for node in existing_nodes}
         graph["nodes"] = [node for node in nodes if node.get("id") not in old_ids] + candidates
         graph["edges"] = [
             edge for edge in edges
             if edge.get("sourceId") not in old_ids and edge.get("targetId") not in old_ids
         ]
-        self.save_private_state(root, state)
+        current_candidate_ids = {candidate["id"] for candidate in candidates}
         groups = graph.setdefault("groups", [])
+        retained_groups = []
+        for group in groups:
+            if group.get("documentId") != document_id or group.get("versionId") != version_id:
+                retained_groups.append(group)
+                continue
+            group_candidate_ids = [
+                candidate_id
+                for candidate_id in group.get("candidateIds", [])
+                if candidate_id in current_candidate_ids
+            ]
+            if len(group_candidate_ids) >= 2:
+                group["candidateIds"] = group_candidate_ids
+                retained_groups.append(group)
+        graph["groups"] = retained_groups
+        self.save_private_state(root, state)
         return {
             "documentId": document_id,
             "versionId": version_id,
@@ -1074,16 +1085,16 @@ class ProjectService:
                 if group.get("documentId") == document_id and group.get("versionId") == version_id
             ],
             "candidateLimitReached": len(candidates) >= 1_000,
-            "nerTruncated": ner_truncated,
-            "nerCandidateCount": sum(node.get("source") == "ner" for node in candidates),
-            "nerWarning": ner_warning,
+            "nerTruncated": False,
+            "nerCandidateCount": 0,
+            "nerWarning": None,
             "ollayaStatus": (
                 "unavailable" if candidates and ollaya_scored_count == 0
                 else "partial" if ollaya_failures
                 else "ready"
             ),
             "ollayaWarning": (
-                "Local Ollaya scoring was unavailable for some or all candidates; heuristic levels remain as fallback."
+                "Local Ollaya scoring was unavailable for some or all words; all extracted words remain available for review."
                 if ollaya_failures
                 else None
             ),

@@ -5,6 +5,7 @@ from backend.app.candidate_engine import (
     CandidateError,
     analyze_candidates,
     blocks_for_document,
+    extract_word_candidates,
 )
 from backend.app.document_adapters import (
     DocumentCell,
@@ -64,6 +65,24 @@ def test_candidate_discovery_callback_emits_words_as_the_scan_finds_them():
     assert {candidate["term"] for candidate in discovered} >= {"Alex Tan", "alex@example.test"}
     assert all(candidate["scoreStatus"] == "scanning" for candidate in discovered)
     assert {candidate["id"] for candidate in discovered} <= {candidate["id"] for candidate in candidates}
+
+
+def test_stage_one_extracts_unique_words_document_wide_and_splits_punctuation_hyphens_and_underscores():
+    candidates = extract_word_candidates(
+        [
+            CandidateBlock("first", "alpha-beta_under jumbledword, alpha"),
+            CandidateBlock("second", "BETA under"),
+        ],
+        "doc-1",
+        "version-1",
+    )
+    by_term = {candidate["term"].casefold(): candidate for candidate in candidates}
+
+    assert set(by_term) == {"alpha", "beta", "under", "jumbledword"}
+    assert by_term["alpha"]["occurrenceCount"] == 2
+    assert by_term["beta"]["occurrenceCount"] == 2
+    assert by_term["under"]["occurrenceCount"] == 2
+    assert all(candidate["category"] == "WORD" for candidate in candidates)
 
 
 def test_manual_phrase_is_included_and_pinned_and_decisions_survive_analysis():

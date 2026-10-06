@@ -16,14 +16,12 @@ from typing import Any
 
 from .candidate_engine import CandidateBlock
 
-SCORING_METHOD = "ollaya_yes_no_v4"
+SCORING_METHOD = "ollaya_yes_no_v5"
 SCORING_MODEL = "von:1.1"
 MAX_CONTEXT_CHARS = 192
 MAX_CONTEXT_WINDOW_CHARS = 192
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_SCORE_CACHE_ENTRIES = 2048
-NON_COMMON_WORD_EXCLUDE_THRESHOLD = 0.5
-
 _QUESTIONS = {
     "is_identifier": {
         "type": "choice",
@@ -33,7 +31,7 @@ _QUESTIONS = {
             "No": "It does not identify a named entity.",
         },
     },
-    "has_operational_significance": {
+    "is_operationally_significant": {
         "type": "choice",
         "instructions": "Does the candidate identify an operational concept in context?",
         "criteria": {
@@ -41,12 +39,12 @@ _QUESTIONS = {
             "No": "It does not identify an operational concept.",
         },
     },
-    "is_not_made_of_common_words": {
+    "is_common_word": {
         "type": "choice",
-        "instructions": "Is this candidate term NOT made entirely of common English words? Ignore capitalization alone. Judge the term itself, not whether it is a valid entity.",
+        "instructions": "Is this candidate a common English word? Ignore capitalization alone. Judge the word itself, not whether it is a valid entity.",
         "criteria": {
-            "Yes": "At least one substantive token is uncommon, invented, malformed, or not a common English word.",
-            "No": "Every substantive token is a common English word.",
+            "Yes": "This is a common English word.",
+            "No": "This is uncommon, invented, malformed, or not a common English word.",
         },
     },
 }
@@ -54,16 +52,16 @@ _QUESTIONS = {
 _SENTENCE_BOUNDARY = re.compile(r"[.!?;\n]")
 _SIGNAL_NAMES = {
     "is_identifier": "isIdentifier",
-    "has_operational_significance": "hasOperationalSignificance",
-    "is_not_made_of_common_words": "isNotMadeOfCommonWords",
+    "is_operationally_significant": "isOperationallySignificant",
+    "is_common_word": "isCommonWord",
 }
 _REDACTION_SIGNAL_NAMES = {
     "is_identifier": "isIdentifier",
-    "has_operational_significance": "hasOperationalSignificance",
+    "is_operationally_significant": "isOperationallySignificant",
 }
 _SIGNAL_REASONS = {
     "is_identifier": "Identifies a named entity in context",
-    "has_operational_significance": "Has operational significance in context",
+    "is_operationally_significant": "Has operational significance in context",
 }
 _LOGGER = logging.getLogger(__name__)
 
@@ -191,14 +189,14 @@ def score_result_from_signals(signals: dict[str, dict[str, str | float]]) -> dic
     priority = confidence_to_priority(confidence)
     valid_signal_count = len(signals)
     reasons = [_SIGNAL_REASONS[name] for name in affirmative_sources]
-    uncommon_words_signal = signals.get("isNotMadeOfCommonWords", {})
+    common_word_signal = signals.get("isCommonWord", {})
     return {
         "redactionConfidence": confidence,
         "reviewPriority": priority,
         "scoringMethod": SCORING_METHOD,
         "scoringModel": SCORING_MODEL,
         "signals": signals,
-        "notCommonWordsProbability": uncommon_words_signal.get("probabilityYes"),
+        "commonWordProbability": common_word_signal.get("probabilityYes"),
         "reasons": reasons,
         "scoreStatus": "complete" if valid_signal_count == len(_SIGNAL_NAMES) else "partial" if valid_signal_count else "unavailable",
     }
@@ -372,29 +370,31 @@ def unavailable_score() -> dict[str, Any]:
         "scoringMethod": SCORING_METHOD,
         "scoringModel": None,
         "signals": {},
-        "notCommonWordsProbability": None,
+        "commonWordProbability": None,
         "reasons": [],
         "scoreStatus": "unavailable",
     }
 
 
 def apply_common_word_filter(candidate: dict[str, Any]) -> None:
-    """Exclude unpinned word-phrase candidates unless Ollaya finds common words."""
-    if candidate.get("category") not in {"CAPITALIZED_PHRASE", "NER_ENTITY"}:
-        return
-    if candidate.get("pinned"):
-        return
-
-    probability = candidate.get("notCommonWordsProbability")
-    valid_probability = _valid_probability(probability)
-    should_exclude = (
-        not valid_probability
-        or probability > NON_COMMON_WORD_EXCLUDE_THRESHOLD
+    """Annotate common-word signals without treating them as user decisions."""
+    signals = candidate.get("signals")
+    signals = signals if isinstance(signals, dict) else {}
+    common = signals.get("isCommonWord")
+    identifier = signals.get("isIdentifier")
+    operational = signals.get("isOperationallySignificant")
+    common_yes = isinstance(common, dict) and common.get("answer") == "Yes"
+    decisive_yes = any(
+        isinstance(signal, dict) and signal.get("answer") == "Yes"
+        for signal in (identifier, operational)
     )
     candidate["commonWordFilterStatus"] = (
-        "unavailable" if not valid_probability else "excluded" if should_exclude else "passed"
+        "unavailable" if not isinstance(common, dict)
+        else "overridden" if common_yes and decisive_yes
+        else "common" if common_yes
+        else "not_common"
     )
-    candidate["decision"] = "excluded" if should_exclude else "suggested"
+    candidate["commonWordOverride"] = common_yes and decisive_yes
 
 
 def should_auto_suggest(candidate: dict[str, Any]) -> bool:
@@ -406,6 +406,8 @@ def should_auto_suggest(candidate: dict[str, Any]) -> bool:
     confidence = candidate.get("redactionConfidence")
     if confidence is not None:
         return True
+    if candidate.get("category") == "WORD":
+        return False
     if candidate.get("scoreStatus") == "complete":
         return False
     return 2 <= int(candidate.get("level", 10)) <= 10

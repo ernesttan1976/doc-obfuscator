@@ -6,6 +6,7 @@ import {
   getCandidatesMatchingSignal,
   getCandidatesNotSelectedAtLevel,
   getVisibleCandidates,
+  isCandidateAutoSuggested,
   upsertCandidate,
 } from './candidate-review.js';
 import { findPageTermMatches, mapClientPointToLayer, mapClientRectToLayer } from './page-highlights.js';
@@ -59,6 +60,12 @@ test('streamed candidates are appended as discovered and later updates preserve 
   assert.deepEqual(appended, [first, second]);
   assert.deepEqual(updated, [{ ...first, category: 'NER_ENTITY' }, second]);
   assert.deepEqual(initial, [first]);
+});
+
+test('unscored word tokens stay review-only until Ollaya affirms a sensitive signal', () => {
+  assert.equal(isCandidateAutoSuggested({ category: 'WORD', scoreStatus: 'unavailable', level: 8 }), false);
+  assert.equal(isCandidateAutoSuggested({ category: 'WORD', scoreStatus: 'complete', level: 8 }), false);
+  assert.equal(isCandidateAutoSuggested({ category: 'WORD', redactionConfidence: 0.8, level: 4 }), true);
 });
 
 test('review counts cover all candidates and do not change with the selected level', () => {

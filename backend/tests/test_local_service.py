@@ -489,7 +489,7 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
             headers=headers,
         )
         candidates = analysis.json()["candidates"]
-        email = next(candidate for candidate in candidates if candidate["term"] == "alex@example.test")
+        email = next(candidate for candidate in candidates if candidate["term"].casefold() == "alex")
         streamed = await client.post(
             "/api/projects/document-candidates/stream",
             json=request,
@@ -500,6 +500,11 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
         assert streamed.status_code == 200
         assert streamed.headers["content-type"].startswith("application/x-ndjson")
         assert streamed_candidates
+        assert {candidate["term"] for candidate in streamed_candidates} == {
+            candidate["term"] for candidate in events[-1]["data"]["candidates"]
+        }
+        assert any(candidate["scoreStatus"] == "queued" for candidate in streamed_candidates)
+        assert any(candidate["scoreStatus"] == "unavailable" for candidate in streamed_candidates)
         assert events[-1]["type"] == "complete"
         assert {candidate["term"] for candidate in streamed_candidates} <= {
             candidate["term"] for candidate in events[-1]["data"]["candidates"]
@@ -515,7 +520,7 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
             headers=headers,
         )
         manual = next(candidate for candidate in candidates if candidate["term"].casefold() == "alex tan")
-        variant = next(candidate for candidate in candidates if candidate["term"] == "Alex Tann")
+        variant = next(candidate for candidate in candidates if candidate["term"] == "Tann")
         first_group = await client.post(
             "/api/projects/candidate-groups",
             json={**request, "operation": "add", "candidate_ids": [manual["id"], variant["id"]]},
@@ -615,25 +620,25 @@ async def test_bulk_candidate_decisions_update_once_and_reject_unknown_ids_atomi
         names = {candidate["term"]: candidate for candidate in candidates}
         bulk = await client.post(
             "/api/projects/candidate-decisions",
-            json={**request, "candidate_ids": [names["Alex Tan"]["id"], names["Jordan Lee"]["id"]], "decision": "included"},
+            json={**request, "candidate_ids": [names["Alex"]["id"], names["Jordan"]["id"]], "decision": "included"},
             headers=headers,
         )
         invalid = await client.post(
             "/api/projects/candidate-decisions",
-            json={**request, "candidate_ids": [names["alex@example.test"]["id"], "unknown-candidate"], "decision": "excluded"},
+            json={**request, "candidate_ids": [names["example"]["id"], "unknown-candidate"], "decision": "excluded"},
             headers=headers,
         )
         repeated = await client.post("/api/projects/document-candidates", json=request, headers=headers)
 
     assert bulk.status_code == 200
     assert {candidate["id"] for candidate in bulk.json()["candidates"] if candidate["decision"] == "included"} >= {
-        names["Alex Tan"]["id"], names["Jordan Lee"]["id"],
+        names["Alex"]["id"], names["Jordan"]["id"],
     }
     assert invalid.status_code == 400
     persisted = {candidate["id"]: candidate for candidate in repeated.json()["candidates"]}
-    assert persisted[names["Alex Tan"]["id"]]["decision"] == "included"
-    assert persisted[names["Jordan Lee"]["id"]]["decision"] == "included"
-    assert persisted[names["alex@example.test"]["id"]]["decision"] == "suggested"
+    assert persisted[names["Alex"]["id"]]["decision"] == "included"
+    assert persisted[names["Jordan"]["id"]]["decision"] == "included"
+    assert persisted[names["example"]["id"]]["decision"] == "suggested"
 
 
 @pytest.mark.anyio
@@ -659,12 +664,16 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
             json={**request, "manual_terms": ["Alex Tan"]},
             headers=headers,
         )
-        email = next(item for item in analysis.json()["candidates"] if item["category"] == "EMAIL")
-        await client.post(
-            "/api/projects/candidate-decision",
-            json={**request, "candidate_id": email["id"], "decision": "excluded"},
-            headers=headers,
-        )
+        candidates = analysis.json()["candidates"]
+        manual = next(item for item in candidates if item["term"] == "Alex Tan")
+        for candidate in candidates:
+            if candidate["id"] == manual["id"]:
+                continue
+            await client.post(
+                "/api/projects/candidate-decision",
+                json={**request, "candidate_id": candidate["id"], "decision": "excluded"},
+                headers=headers,
+            )
         broad_preview_response = await client.post(
             "/api/projects/export-preview",
             json={**request, "level": 10},
@@ -725,7 +734,7 @@ async def test_obfuscation_preview_requires_explicit_ack_and_saves_private_immut
     assert {match["term"] for match in preview["matches"]} == {"Alex Tan"}
     assert {match["term"] for match in partial_preview["matches"]} == {"Alex Tan"}
     assert {match["term"] for match in broad_preview["matches"]} == {"Alex Tan"}
-    assert all(match["term"] != "alex@example.test" for match in preview["matches"])
+    assert all(match["term"] != "alex" for match in preview["matches"])
     generated_tokens = re.findall(r"\[\[T_[0-9a-f]{6}\]\]", preview["preview"]["text"])
     assert len(generated_tokens) == 1
     assert unacknowledged.status_code == 409
@@ -961,7 +970,7 @@ def test_confirmed_group_decisions_propagate_without_overriding_a_pinned_exclusi
     imported = service.import_documents(root, [source])[0]
     analysis = service.analyze_document_candidates(root, imported.document_id, ["Alex Tan"])
     first = next(item for item in analysis["candidates"] if item["term"] == "Alex Tan")
-    second = next(item for item in analysis["candidates"] if item["term"] == "Alex Tann")
+    second = next(item for item in analysis["candidates"] if item["term"] == "Tann")
     group = service.update_candidate_groups(
         root,
         imported.document_id,
