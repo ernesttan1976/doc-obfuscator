@@ -1,21 +1,27 @@
 # Document candidate data flow
 
-## At a glance
+## Target flow at a glance
 
 ```text
 Open/import original
   → parse supported editable text for preview
-  → discover deterministic + optional local NER candidates
-  → stream discovery rows to the review UI (status: scanning)
-  → build a short context for each candidate
-  → ask local Ollaya for typed yes/no signals (or use unavailable fallback)
+  → Stage 1: extract and deduplicate words from the whole document
+  → Stage 2: query local Ollaya for identifier, operational-significance,
+    and common-word signals
+  → stream each Stage 2 result to the review UI as it arrives
   → save scored candidates and decisions in encrypted project state
-  → return the completed candidate list to the UI
-  → filter by obfuscation level, review, Include/Exclude
+  → bulk Include/Exclude or individually cherry-pick reviewed words
   → export preview uses included/auto-suggested candidates at that level
 ```
 
-## Detailed flow
+## Staged candidate review
+
+1. **Stage 1 — extract unique words.** Read all supported editable text in the document and build one deduplicated set of words for the whole document. Remove punctuation; treat hyphens and underscores as separators so that the words on either side are considered independently. Keep the extracted terms even when they look malformed or appear jumbled together: those are noisy candidates for review, not a reason to silently discard them.
+2. **Stage 2 — classify each word with Ollaya.** Query three typed yes/no signals for each unique word: `is_identifier`, `is_operationally_significant`, and `is_common_word`. Ollaya classifies candidates but does not make the user's Include/Exclude decision.
+3. **Interpret the signals for review.** `is_common_word` by itself must not eliminate a word. If either `is_identifier` or `is_operationally_significant` is affirmative, treat that as meaningful even when `is_common_word` is also affirmative. Keep the signals visible so the user can make the final decision.
+4. **Show results incrementally.** Add each word to the Stage 2 review list as its Ollaya query completes; do not wait for the entire document to finish. The user can bulk Include, bulk Exclude, or cherry-pick individual words while results arrive. Preserve those explicit decisions when later results are added.
+
+## Current implementation flow
 
 1. **Document is opened.** `App.jsx` calls `loadProjectDocumentPreview` for a project document. The local `/api/projects/document-preview` endpoint reads the selected saved version through the document adapter and returns supported editable text, preview sections, and coverage warnings. For an original version, the frontend then calls `loadProjectDocumentCandidates`.
 2. **Candidates are discovered.** The frontend posts to `/api/projects/document-candidates/stream`. `ProjectService.analyze_document_candidates` loads the original and its private project state, builds text blocks, then calls `analyze_candidates` in `candidate_engine.py`. Deterministic patterns find email addresses, phone numbers, dates, identifiers, and capitalized phrases. If an optional local NER model is available, its entities are merged in; user-added phrases are treated as pinned manual candidates. A normalized term and document-version ID determine the stable candidate ID. Discovery is capped at 1,000 candidates per version.
