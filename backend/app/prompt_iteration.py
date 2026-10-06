@@ -84,9 +84,15 @@ class PromptIterationError(Exception):
 
 
 class _LocalOllayaPromptScorer:
-    def __init__(self, model: str = SCORING_MODEL, timeout_seconds: int = 60) -> None:
+    def __init__(
+        self,
+        model: str = SCORING_MODEL,
+        timeout_seconds: int = 60,
+        log_path: Path | None = None,
+    ) -> None:
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.log_path = log_path
         self.executable = shutil.which("ollaya")
         self._model_checked = False
 
@@ -105,17 +111,20 @@ class _LocalOllayaPromptScorer:
             "json",
             "--state-json",
         ]
+        request_input = json.dumps(word, ensure_ascii=False, separators=(",", ":"))
         try:
             completed = subprocess.run(
                 command,
-                input=json.dumps(word, ensure_ascii=False, separators=(",", ":")),
+                input=request_input,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
+            self._log_output("score", command, request_input, error=exc)
             raise PromptIterationError("The local Ollaya scoring call failed or timed out.") from exc
+        self._log_output("score", command, request_input, completed=completed)
         if completed.returncode != 0:
             raise PromptIterationError("Local Ollaya scoring failed.")
         try:
@@ -145,7 +154,9 @@ class _LocalOllayaPromptScorer:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
+            self._log_output("model_list", [self.executable, "list"], error=exc)
             raise PromptIterationError("The local Ollaya model list could not be checked.") from exc
+        self._log_output("model_list", [self.executable, "list"], completed=completed)
         installed = {
             line.split()[0]
             for line in completed.stdout.splitlines()
@@ -154,6 +165,42 @@ class _LocalOllayaPromptScorer:
         if completed.returncode != 0 or self.model not in installed:
             raise PromptIterationError(f"The configured local Ollaya model {self.model!r} is not installed.")
         self._model_checked = True
+
+    def _log_output(
+        self,
+        event: str,
+        command: Sequence[str],
+        request_input: str | None = None,
+        *,
+        completed: Any = None,
+        error: BaseException | None = None,
+    ) -> None:
+        if self.log_path is None:
+            return
+
+        def output_text(value: Any) -> str | None:
+            if value is None:
+                return None
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return str(value)
+
+        entry = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "event": event,
+            "model": self.model,
+            "command": list(command),
+            "request": request_input,
+            "returncode": getattr(completed, "returncode", None),
+            "stdout": output_text(getattr(completed, "stdout", None) if completed is not None else getattr(error, "stdout", None)),
+            "stderr": output_text(getattr(completed, "stderr", None) if completed is not None else getattr(error, "stderr", None)),
+            "error": f"{type(error).__name__}: {error}" if error is not None else None,
+        }
+        try:
+            with self.log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except OSError as exc:
+            raise PromptIterationError(f"Could not write Ollaya output log: {self.log_path}") from exc
 
 
 def _questions_for_prompt(prompt: str) -> dict[str, dict[str, Any]]:
@@ -397,7 +444,7 @@ def iterate_prompt_for_file(
             raise PromptIterationError(f"Output directory is not empty: {run_directory}")
     run_directory.mkdir(parents=True, exist_ok=True)
 
-    score_word = scorer or _LocalOllayaPromptScorer().score
+    score_word = scorer or _LocalOllayaPromptScorer(log_path=run_directory / "ollaya.jsonl").score
     revise_prompt = prompt_reviser or _revise_prompt_with_openai
     read_input = input_fn or input
     write_output = output_fn or print

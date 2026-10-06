@@ -1,6 +1,7 @@
 import csv
 import json
 from io import BytesIO
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,9 +10,46 @@ from backend.app.prompt_iteration import (
     CSV_COLUMNS,
     PromptIterationError,
     _document_to_plain_text,
+    _LocalOllayaPromptScorer,
     _revise_prompt_with_openai,
     iterate_prompt_for_file,
 )
+
+
+def test_local_ollaya_scorer_logs_raw_outputs_and_requests(tmp_path, monkeypatch):
+    log_path = tmp_path / "ollaya.jsonl"
+    answers = {
+        "is_identifier": {"type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.9}},
+        "is_operationally_significant": {"type": "choice", "choice": "No", "probabilities": {"Yes": 0.1}},
+        "is_common_word": {"type": "choice", "choice": "No", "probabilities": {"Yes": 0.2}},
+    }
+    response = json.dumps({"model": "von:1.1", "answers": answers})
+
+    def fake_run(command, **_kwargs):
+        if command[1] == "list":
+            return SimpleNamespace(returncode=0, stdout="NAME\nvon:1.1\n", stderr="list diagnostic")
+        return SimpleNamespace(returncode=0, stdout=response, stderr="scoring diagnostic")
+
+    monkeypatch.setattr("backend.app.prompt_iteration.shutil.which", lambda _name: "/usr/bin/ollaya")
+    monkeypatch.setattr("backend.app.prompt_iteration.subprocess.run", fake_run)
+    scorer = _LocalOllayaPromptScorer(log_path=log_path)
+
+    result = scorer.score({"candidate": "Falcon", "context": "Falcon launches at dawn."}, "Review entities")
+
+    assert result == {
+        "is_identifier": 0.9,
+        "is_operationally_significant": 0.1,
+        "is_common_word": 0.2,
+    }
+    entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [entry["event"] for entry in entries] == ["model_list", "score"]
+    assert entries[0]["stdout"] == "NAME\nvon:1.1\n"
+    assert entries[1]["stdout"] == response
+    assert entries[1]["stderr"] == "scoring diagnostic"
+    assert json.loads(entries[1]["request"]) == {
+        "candidate": "Falcon",
+        "context": "Falcon launches at dawn.",
+    }
 
 
 def test_iterate_prompt_for_file_reviews_corrects_and_runs_revised_prompt(tmp_path):

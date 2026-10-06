@@ -89,6 +89,8 @@ Give the prompt-revision model the current prompt, the reviewed misclassificatio
 
 Prompt revision uses the OpenAI Responses API with `PROMPT_REVISER_MODEL` (default `gpt-6-luna`) and `OPENAI_API_KEY` loaded from the repository `.env`. Only reviewed error examples are sent for revision; the full source document and complete word set are not submitted in the revision request. Users should treat the reviewed contexts and labels as data shared with OpenAI.
 
+The default local Ollaya scorer writes every `ollaya list` and scoring subprocess result to `ollaya.jsonl` in the run directory. Each line includes the command, scoring request where applicable, raw stdout/stderr, return code, and any execution error. The log therefore contains each candidate and its bounded text context; it remains local and should be handled as sensitive document data. Injected test/application scorers do not create this log.
+
 ## Iteration ledger and success criteria
 
 Maintain an iteration ledger (for example, `prompt_iterations.json`) containing each run ID, prompt version, model/configuration, input-set hash, CSV path, reviewed count, incorrect word count, error rate, per-signal errors, and prompt-change rationale.
@@ -104,6 +106,7 @@ prompt_v001.txt
 run001.csv                 # Exactly four model-output columns
 run001.json                # Prompt/model/configuration and input-set metadata
 run001-review.csv          # Human corrections and review state
+ollaya.jsonl               # Raw stdout/stderr for every local Ollaya invocation
 prompt_v002.txt
 run002.csv
 run002.json
