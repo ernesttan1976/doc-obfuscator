@@ -2,6 +2,8 @@ import json
 import logging
 import secrets
 import subprocess
+import threading
+import time
 
 import pytest
 
@@ -13,6 +15,7 @@ from backend.app.ollaya_scoring import (
     apply_common_word_filter,
     build_ollaya_scoring_input,
     confidence_to_priority,
+    get_ollaya_parallel_runs,
     score_result_from_signals,
     should_auto_suggest,
     validate_ollaya_response,
@@ -316,6 +319,61 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
     encrypted_state = (project_dir / ".blot" / "private-state.enc").read_bytes()
     assert b"Alex Tan met Jordan Lee on Monday" not in encrypted_state
     assert b'"context"' not in encrypted_state
+
+
+def test_project_analysis_runs_ollaya_candidates_up_to_configured_parallel_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("OLLAYA_PARALLEL_RUNS", "2")
+
+    class ConcurrentScorer:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.active = 0
+            self.peak_active = 0
+
+        def score_candidate(self, features):
+            with self.lock:
+                self.active += 1
+                self.peak_active = max(self.peak_active, self.active)
+            try:
+                time.sleep(0.05)
+                return score_result_from_signals({
+                    "isIdentifier": {"answer": "No", "probabilityYes": 0.1},
+                    "isOperationallySignificant": {"answer": "No", "probabilityYes": 0.2},
+                    "isCommonWord": {"answer": "No", "probabilityYes": 0.1},
+                })
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    project_dir = tmp_path / "workspace"
+    project_dir.mkdir()
+    source = tmp_path / "brief.txt"
+    source.write_text("Alex Tan met Jordan Lee near Project Falcon.", encoding="utf-8")
+    scorer = ConcurrentScorer()
+    service = ProjectService(MemoryKeyStore(), ollaya_scorer=scorer)
+    service.create(project_dir, "Test workspace")
+    document = service.import_documents(project_dir, [source])[0]
+
+    analysis = service.analyze_document_candidates(
+        project_dir,
+        document.document_id,
+        ["Alex Tan", "Jordan Lee", "Project Falcon"],
+    )
+
+    assert len(analysis["candidates"]) >= 2
+    assert scorer.peak_active == 2
+    assert all(candidate["scoreStatus"] == "complete" for candidate in analysis["candidates"])
+
+
+def test_ollaya_parallel_runs_reads_env_and_falls_back_for_invalid_values(monkeypatch):
+    monkeypatch.setenv("OLLAYA_PARALLEL_RUNS", "7")
+    assert get_ollaya_parallel_runs() == 7
+
+    monkeypatch.setenv("OLLAYA_PARALLEL_RUNS", "invalid")
+    assert get_ollaya_parallel_runs() == 1
+
+    monkeypatch.setenv("OLLAYA_PARALLEL_RUNS", "0")
+    assert get_ollaya_parallel_runs() == 1
 
 
 def test_common_word_and_signals_set_automatic_decision_without_overriding_manual_choice():

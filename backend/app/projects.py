@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -33,12 +34,12 @@ from .document_adapters import (
 )
 from .key_store import KeyStoreUnavailable, ProjectKeyStore
 from .local_crypto import atomic_write_private, decrypt_state, encrypt_state
-from .model_manager import ModelManagerError
 from .ollaya_scoring import (
     LocalOllayaScorer,
     OllayaScoringError,
     apply_common_word_filter,
     build_ollaya_scoring_input,
+    get_ollaya_parallel_runs,
     should_auto_suggest,
     unavailable_score,
 )
@@ -1023,29 +1024,38 @@ class ProjectService:
                 on_candidate(dict(candidate))
 
         if self.ollaya_scorer is not None:
-            for candidate in candidates:
-                try:
-                    features = build_ollaya_scoring_input(
-                        candidate,
-                        blocks,
-                    )
-                    candidate.update(self.ollaya_scorer.score_candidate(features))
-                    review_priority = candidate.get("reviewPriority")
-                    if isinstance(review_priority, int):
-                        candidate["level"] = max(2, min(10, review_priority))
-                    if candidate.get("scoreStatus") in {"complete", "partial"}:
-                        ollaya_scored_count += 1
-                        if candidate.get("scoreStatus") == "partial":
+            if candidates:
+                max_workers = min(get_ollaya_parallel_runs(), len(candidates))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    scoring = {
+                        executor.submit(
+                            lambda candidate=candidate: self.ollaya_scorer.score_candidate(
+                                build_ollaya_scoring_input(candidate, blocks)
+                            ),
+                        ): candidate
+                        for candidate in candidates
+                    }
+                    scored_candidates = as_completed(scoring)
+                    for future in scored_candidates:
+                        candidate = scoring[future]
+                        try:
+                            candidate.update(future.result())
+                            review_priority = candidate.get("reviewPriority")
+                            if isinstance(review_priority, int):
+                                candidate["level"] = max(2, min(10, review_priority))
+                            if candidate.get("scoreStatus") in {"complete", "partial"}:
+                                ollaya_scored_count += 1
+                                if candidate.get("scoreStatus") == "partial":
+                                    ollaya_failures += 1
+                            else:
+                                ollaya_failures += 1
+                        except (OllayaScoringError, OSError, ValueError, TypeError, KeyError):
+                            # Scoring is advisory and must never block document analysis.
+                            candidate.update(unavailable_score())
                             ollaya_failures += 1
-                    else:
-                        ollaya_failures += 1
-                except (OllayaScoringError, OSError, ValueError, TypeError, KeyError):
-                    # Scoring is advisory and must never block document analysis.
-                    candidate.update(unavailable_score())
-                    ollaya_failures += 1
-                apply_common_word_filter(candidate)
-                if on_candidate is not None:
-                    on_candidate(dict(candidate))
+                        apply_common_word_filter(candidate)
+                        if on_candidate is not None:
+                            on_candidate(dict(candidate))
         else:
             ollaya_failures = len(candidates)
             for candidate in candidates:

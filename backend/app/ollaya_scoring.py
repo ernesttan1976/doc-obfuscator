@@ -28,6 +28,16 @@ MAX_CONTEXT_CHARS = 192
 MAX_CONTEXT_WINDOW_CHARS = 192
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_SCORE_CACHE_ENTRIES = 2048
+
+
+def get_ollaya_parallel_runs() -> int:
+    """Return the configured maximum number of concurrent Ollaya candidate runs."""
+    try:
+        return max(1, int(os.environ.get("OLLAYA_PARALLEL_RUNS", "1").strip()))
+    except (AttributeError, ValueError):
+        return 1
+
+
 _QUESTIONS = {
     "is_identifier": {
         "type": "choice",
@@ -227,6 +237,7 @@ class LocalOllayaScorer:
         self.timeout_seconds = timeout_seconds
         self._run = run
         self._model_checked = False
+        self._model_check_lock = threading.Lock()
         self._score_cache: OrderedDict[str, tuple[Any, dict[str, Any]]] = OrderedDict()
         self._score_cache_lock = threading.Lock()
         self._score_inflight: dict[str, threading.Lock] = {}
@@ -354,26 +365,29 @@ class LocalOllayaScorer:
     def _ensure_model_installed(self, executable: str) -> None:
         if self._model_checked:
             return
-        try:
-            completed = self._run(
-                [executable, "list"],
-                capture_output=True,
-                text=True,
-                timeout=min(self.timeout_seconds, 10),
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise OllayaScoringError("The local Ollaya model list could not be checked.") from exc
-        if completed.returncode != 0:
-            raise OllayaScoringError("The local Ollaya model list could not be checked.")
-        installed_models = {
-            line.split()[0]
-            for line in completed.stdout.splitlines()
-            if line.split() and line.split()[0] != "NAME"
-        }
-        if self.model not in installed_models:
-            raise OllayaScoringError("The configured local Ollaya model is not installed.")
-        self._model_checked = True
+        with self._model_check_lock:
+            if self._model_checked:
+                return
+            try:
+                completed = self._run(
+                    [executable, "list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=min(self.timeout_seconds, 10),
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise OllayaScoringError("The local Ollaya model list could not be checked.") from exc
+            if completed.returncode != 0:
+                raise OllayaScoringError("The local Ollaya model list could not be checked.")
+            installed_models = {
+                line.split()[0]
+                for line in completed.stdout.splitlines()
+                if line.split() and line.split()[0] != "NAME"
+            }
+            if self.model not in installed_models:
+                raise OllayaScoringError("The configured local Ollaya model is not installed.")
+            self._model_checked = True
 
 
 def unavailable_score() -> dict[str, Any]:
