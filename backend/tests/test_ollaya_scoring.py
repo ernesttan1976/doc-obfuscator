@@ -110,6 +110,28 @@ def test_contradictory_or_missing_signal_is_unavailable_not_a_no():
     assert score_result_from_signals(partial)["scoreStatus"] == "partial"
 
 
+def test_configured_model_is_validated_and_reported():
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "list":
+            return subprocess.CompletedProcess(command, 0, stdout="NAME\ncustom:2 id 1GB now\n", stderr="")
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps({"model": "custom:2", "answers": {}}), stderr=""
+        )
+
+    result = LocalOllayaScorer(
+        executable="/usr/local/bin/ollaya", model="custom:2", run=fake_run
+    ).score_candidate({"candidate": "test"})
+
+    assert calls[1][2] == "custom:2"
+    assert result["scoringModel"] == "custom:2"
+    assert result["scoreStatus"] == "unavailable"
+    with pytest.raises(OllayaScoringError):
+        validate_ollaya_response({"model": "custom:2", "answers": {}}, expected_model="von:1.1")
+
+
 def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
     captured = {}
 

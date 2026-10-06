@@ -27,7 +27,7 @@ The command starts the local API and Vite, then opens the app in your browser. P
 
 To install the optional NER runtime, use `uv sync --inexact --extra models`. This installs Python packages only; NER weights/tokenizer assets remain absent until explicitly downloaded from the saved-document review panel.
 
-Candidate review also uses Ollaya's local CLI with the `von:1.1` model. Install Ollaya and explicitly acquire that model with `ollaya pull von:1.1` before launching Blot; Blot never downloads it. Each extracted term and at most one 192-character local context snippet is sent to the local Ollaya runtime for the identifier and operational-significance questions. Candidate text is supplied on the CLI's stdin and is not sent to a hosted endpoint. If Ollaya or the model is unavailable, analysis continues with existing heuristic levels and labels the semantic score as unavailable.
+Candidate review also uses Ollaya's local CLI. Set `OLLAYA_MODEL` in `.env` (the default is `von:1.1`), then install Ollaya and explicitly acquire the configured model, for example `ollaya pull von:1.1`, before launching Blot; Blot never downloads it. Each extracted term and at most one 192-character local context snippet is sent to the local Ollaya runtime for the identifier and operational-significance questions. Candidate text is supplied on the CLI's stdin and is not sent to a hosted endpoint. If Ollaya or the model is unavailable, analysis continues with existing heuristic levels and labels the semantic score as unavailable.
 
 The backend writes each Ollaya request and raw response as a single local log line. This includes the candidate and bounded context supplied for scoring; those logs are not sent externally. Context is not stored in the encrypted project state.
 

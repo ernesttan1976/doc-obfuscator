@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -12,12 +13,17 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
 
 from .candidate_engine import CandidateBlock
 
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
 SCORING_METHOD = "ollaya_yes_no_v5"
-SCORING_MODEL = "von:1.1"
+SCORING_MODEL = os.environ.get("OLLAYA_MODEL", "von:1.1").strip() or "von:1.1"
 MAX_CONTEXT_CHARS = 192
 MAX_CONTEXT_WINDOW_CHARS = 192
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -154,9 +160,11 @@ def confidence_to_priority(confidence: float | None) -> int | None:
     return 10
 
 
-def validate_ollaya_response(response: Any) -> dict[str, dict[str, str | float]]:
+def validate_ollaya_response(
+    response: Any, expected_model: str = SCORING_MODEL
+) -> dict[str, dict[str, str | float]]:
     """Keep individually valid typed signals; malformed or contradictory ones are unavailable."""
-    if not isinstance(response, dict) or response.get("model") != SCORING_MODEL:
+    if not isinstance(response, dict) or response.get("model") != expected_model:
         raise OllayaScoringError("Ollaya returned an unexpected model response.")
     answers = response.get("answers")
     if not isinstance(answers, dict):
@@ -177,7 +185,9 @@ def validate_ollaya_response(response: Any) -> dict[str, dict[str, str | float]]
     return signals
 
 
-def score_result_from_signals(signals: dict[str, dict[str, str | float]]) -> dict[str, Any]:
+def score_result_from_signals(
+    signals: dict[str, dict[str, str | float]], model: str = SCORING_MODEL
+) -> dict[str, Any]:
     affirmative_sources = [
         source_name
         for source_name, public_name in _REDACTION_SIGNAL_NAMES.items()
@@ -194,7 +204,7 @@ def score_result_from_signals(signals: dict[str, dict[str, str | float]]) -> dic
         "redactionConfidence": confidence,
         "reviewPriority": priority,
         "scoringMethod": SCORING_METHOD,
-        "scoringModel": SCORING_MODEL,
+        "scoringModel": model,
         "signals": signals,
         "commonWordProbability": common_word_signal.get("probabilityYes"),
         "reasons": reasons,
@@ -290,7 +300,10 @@ class LocalOllayaScorer:
                         return deepcopy(cached[0]), deepcopy(cached[1]), True
 
                 response = self._score_candidate(features)
-                result = score_result_from_signals(validate_ollaya_response(response))
+                result = score_result_from_signals(
+                    validate_ollaya_response(response, expected_model=self.model),
+                    model=self.model,
+                )
                 with self._score_cache_lock:
                     self._score_cache[cache_key] = (deepcopy(response), deepcopy(result))
                     self._score_cache.move_to_end(cache_key)
