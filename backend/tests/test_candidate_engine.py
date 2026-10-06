@@ -107,6 +107,16 @@ def test_stage_one_does_not_extract_numbers_at_or_below_9999():
     assert {candidate["term"] for candidate in candidates} == {"10000", "alpha"}
 
 
+def test_stage_one_manual_selection_cannot_add_numbers_at_or_below_9999():
+    with pytest.raises(CandidateError, match="0 through 9999"):
+        extract_word_candidates(
+            [CandidateBlock("text", "123 alpha")],
+            "doc-1",
+            "version-1",
+            manual_terms=["123"],
+        )
+
+
 def test_manual_phrase_is_included_and_pinned_and_decisions_survive_analysis():
     blocks = [CandidateBlock("text", "Project Cedar; project cedar remains internal.")]
     candidates = analyze_candidates(blocks, "doc-1", "version-1", manual_terms=["Project Cedar"])

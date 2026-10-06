@@ -57,6 +57,12 @@ _IDENTIFIER = re.compile(r"\b(?:[A-Z]{2,}[\w]*[-_/][A-Z0-9][A-Z0-9_-]*|[A-Z]{2,}
 _CAPITALIZED_TOKEN = re.compile(r"(?<![\w])(?:[A-Z][a-z]+(?:[’'-][A-Z]?[a-z]+)*|[A-Z]\.)(?![\w])")
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _COMMON_SENTENCE_STARTERS = {"a", "an", "at", "contact", "for", "from", "in", "on", "owner", "please", "reference", "the", "to"}
+
+
+def _is_small_number(term: str) -> bool:
+    return term.isdecimal() and int(term) <= 9_999
+
+
 @dataclass(frozen=True)
 class CandidateBlock:
     location: str
@@ -292,7 +298,7 @@ def extract_word_candidates(
     for block in blocks:
         for match in _WORD.finditer(block.text):
             term = match.group(0)
-            if len(term) > 256 or (term.isdecimal() and int(term) <= 9_999):
+            if len(term) > 256 or _is_small_number(term):
                 continue
             _add_occurrence(
                 collected,
@@ -307,6 +313,8 @@ def extract_word_candidates(
         clean_term = " ".join(term.split())
         if not clean_term or len(clean_term) > 256 or any(ord(char) < 32 for char in clean_term):
             raise CandidateError("Manually selected phrases must contain 1–256 printable characters.")
+        if _is_small_number(clean_term):
+            raise CandidateError("Numbers from 0 through 9999 are not included in the Stage 1 word list.")
         found = False
         for block in blocks:
             for match in re.finditer(re.escape(clean_term), block.text, re.IGNORECASE):
