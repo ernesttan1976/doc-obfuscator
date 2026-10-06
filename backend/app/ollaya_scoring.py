@@ -395,6 +395,18 @@ def apply_common_word_filter(candidate: dict[str, Any]) -> None:
         else "not_common"
     )
     candidate["commonWordOverride"] = common_yes and decisive_yes
+    if candidate.get("pinned"):
+        return
+    if decisive_yes:
+        candidate["decision"] = "included"
+    elif (
+        common_yes
+        and isinstance(identifier, dict)
+        and identifier.get("answer") == "No"
+        and isinstance(operational, dict)
+        and operational.get("answer") == "No"
+    ):
+        candidate["decision"] = "excluded"
 
 
 def should_auto_suggest(candidate: dict[str, Any]) -> bool:

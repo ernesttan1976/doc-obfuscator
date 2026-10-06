@@ -286,7 +286,7 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
     assert analysis["ollayaStatus"] == "ready"
     assert by_term["Alex Tan"]["decision"] == "included"
     assert by_term["Alex Tan"]["pinned"] is True
-    assert by_term["Jordan"]["decision"] == "suggested"
+    assert by_term["Jordan"]["decision"] == "excluded"
     assert by_term["Jordan"]["commonWordProbability"] == 0.8
     assert by_term["Jordan"]["scoreStatus"] == "complete"
     assert by_term["Jordan"]["redactionConfidence"] is None
@@ -296,13 +296,17 @@ def test_project_analysis_scores_each_candidate_and_keeps_manual_decisions_autho
     assert b'"context"' not in encrypted_state
 
 
-def test_common_word_signal_is_advisory_and_identifier_or_operational_yes_overrides_it():
+def test_common_word_and_signals_set_automatic_decision_without_overriding_manual_choice():
     common = {
         "decision": "suggested",
-        "signals": {"isCommonWord": {"answer": "Yes", "probabilityYes": 0.9}},
+        "signals": {
+            "isCommonWord": {"answer": "Yes", "probabilityYes": 0.9},
+            "isIdentifier": {"answer": "No", "probabilityYes": 0.1},
+            "isOperationallySignificant": {"answer": "No", "probabilityYes": 0.2},
+        },
     }
     apply_common_word_filter(common)
-    assert common["decision"] == "suggested"
+    assert common["decision"] == "excluded"
     assert common["commonWordFilterStatus"] == "common"
     assert common["commonWordOverride"] is False
 
@@ -314,7 +318,7 @@ def test_common_word_signal_is_advisory_and_identifier_or_operational_yes_overri
         },
     }
     apply_common_word_filter(identified)
-    assert identified["decision"] == "suggested"
+    assert identified["decision"] == "included"
     assert identified["commonWordFilterStatus"] == "overridden"
     assert identified["commonWordOverride"] is True
 
@@ -326,7 +330,27 @@ def test_common_word_signal_is_advisory_and_identifier_or_operational_yes_overri
         },
     }
     apply_common_word_filter(operational)
+    assert operational["decision"] == "included"
     assert operational["commonWordOverride"] is True
+
+    uncommon_identifier = {
+        "decision": "suggested",
+        "signals": {"isIdentifier": {"answer": "Yes", "probabilityYes": 0.8}},
+    }
+    apply_common_word_filter(uncommon_identifier)
+    assert uncommon_identifier["decision"] == "included"
+
+    manual = {
+        "decision": "included",
+        "pinned": True,
+        "signals": {
+            "isCommonWord": {"answer": "Yes", "probabilityYes": 0.9},
+            "isIdentifier": {"answer": "No", "probabilityYes": 0.1},
+            "isOperationallySignificant": {"answer": "No", "probabilityYes": 0.2},
+        },
+    }
+    apply_common_word_filter(manual)
+    assert manual["decision"] == "included"
 
     unavailable = {"decision": "suggested", "signals": {}}
     apply_common_word_filter(unavailable)

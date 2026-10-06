@@ -1630,7 +1630,7 @@ export default function App() {
                     <button className="small-btn primary" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || !reviewCandidates.length} onClick={() => applyBulkCandidateDecision(reviewCandidates.map((candidate) => candidate.id), 'included')}>Include all words</button>
                     <button className="small-btn" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || !reviewCandidates.length} onClick={() => applyBulkCandidateDecision(reviewCandidates.map((candidate) => candidate.id), 'excluded')}>Exclude all words</button>
                   </div>
-                  <p>Select words as they appear during Ollaya review, then apply one decision to the selection. Signals inform review; the common-word signal never excludes a word on its own.</p>
+                  <p>Select words as they appear during Ollaya review, then apply one decision to the selection. A common-word Yes excludes a word only when both identifier and operational signals are No; either Yes includes it automatically.</p>
                   {[
                     ['isIdentifier', 'Identifier / named entity'],
                     ['isOperationallySignificant', 'Operational significance'],
