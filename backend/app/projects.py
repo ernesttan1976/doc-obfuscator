@@ -65,7 +65,6 @@ SUPPORTED_DOCUMENT_EXTENSIONS = {".docx", ".pptx", ".txt", ".md", ".csv", ".xlsx
 TOKEN_LIKE_TEXT = re.compile(r"\[\[T_[^\]\r\n]{1,128}\]\]", re.IGNORECASE)
 VALID_PLACEHOLDER = re.compile(r"\[\[T_[A-Za-z0-9_-]{3,}\]\]", re.IGNORECASE)
 MAX_RESTORE_REPORT_TOKENS = 500
-OLLAYA_RESULTS_NAME = "ollaya_results.csv"
 OLLAYA_RESULTS_COLUMNS = (
     "word",
     "is_identifier_percent",
@@ -177,55 +176,78 @@ class ProjectService:
         self._ollaya_results_lock = threading.RLock()
         self._ollaya_results_cache: dict[str, dict[str, dict[str, object]]] = {}
 
-    def get_ollaya_results(self, directory: str | Path) -> list[dict[str, object]]:
+    def get_ollaya_results(self, directory: str | Path, document_id: str) -> dict[str, object]:
         root = self._validate_directory(directory)
         self.open(root)
+        path = self._ollaya_results_path(root, document_id)
         with self._ollaya_results_lock:
-            rows = self._read_ollaya_results(root)
-            self._ollaya_results_cache[str(root)] = {
+            rows = self._read_ollaya_results(path)
+            self._ollaya_results_cache[str(path)] = {
                 str(row["word"]).casefold(): row for row in rows
             }
-            return rows
+            if not path.exists():
+                self._write_ollaya_results(path, {})
+            return {"filename": path.name, "rows": rows}
 
     def update_ollaya_result(
         self,
         directory: str | Path,
+        document_id: str,
         row: dict[str, object],
         previous_word: str | None = None,
     ) -> dict[str, object]:
         root = self._validate_directory(directory)
         self.open(root)
+        path = self._ollaya_results_path(root, document_id)
         with self._ollaya_results_lock:
-            rows = self._load_ollaya_results_cache(root)
+            rows = self._load_ollaya_results_cache(path)
             clean_row = _normalize_ollaya_result_row(row)
             if previous_word and previous_word.casefold() != str(clean_row["word"]).casefold():
                 rows.pop(previous_word.casefold(), None)
             rows[str(clean_row["word"]).casefold()] = clean_row
-            self._write_ollaya_results(root, rows)
+            self._write_ollaya_results(path, rows)
             return dict(clean_row)
 
-    def _record_ollaya_result(self, root: Path, row: dict[str, object]) -> None:
+    def replace_ollaya_results(
+        self,
+        directory: str | Path,
+        document_id: str,
+        rows: list[dict[str, object]],
+        original_words: list[str],
+    ) -> list[dict[str, object]]:
+        root = self._validate_directory(directory)
+        self.open(root)
+        path = self._ollaya_results_path(root, document_id)
+        normalized = [_normalize_ollaya_result_row(row) for row in rows]
+        with self._ollaya_results_lock:
+            keyed_rows = self._load_ollaya_results_cache(path)
+            for word in original_words:
+                keyed_rows.pop(str(word).casefold(), None)
+            keyed_rows.update({str(row["word"]).casefold(): row for row in normalized})
+            self._write_ollaya_results(path, keyed_rows)
+            return sorted(keyed_rows.values(), key=lambda row: str(row["word"]).casefold())
+
+    def _record_ollaya_result(self, path: Path, row: dict[str, object]) -> None:
         clean_row = _normalize_ollaya_result_row(row)
         with self._ollaya_results_lock:
-            rows = self._load_ollaya_results_cache(root)
+            rows = self._load_ollaya_results_cache(path)
             key = str(clean_row["word"]).casefold()
             existing = rows.get(key)
             if existing is not None:
                 clean_row["is_correct"] = existing["is_correct"]
             rows[key] = clean_row
-            self._write_ollaya_results(root, rows)
+            self._write_ollaya_results(path, rows)
 
-    def _load_ollaya_results_cache(self, root: Path) -> dict[str, dict[str, object]]:
-        key = str(root)
+    def _load_ollaya_results_cache(self, path: Path) -> dict[str, dict[str, object]]:
+        key = str(path)
         if key not in self._ollaya_results_cache:
             self._ollaya_results_cache[key] = {
-                str(row["word"]).casefold(): row for row in self._read_ollaya_results(root)
+                str(row["word"]).casefold(): row for row in self._read_ollaya_results(path)
             }
         return self._ollaya_results_cache[key]
 
     @staticmethod
-    def _read_ollaya_results(root: Path) -> list[dict[str, object]]:
-        path = root / OLLAYA_RESULTS_NAME
+    def _read_ollaya_results(path: Path) -> list[dict[str, object]]:
         if not path.exists():
             return []
         try:
@@ -240,12 +262,32 @@ class ProjectService:
         return sorted(unique_rows.values(), key=lambda row: str(row["word"]).casefold())
 
     @staticmethod
-    def _write_ollaya_results(root: Path, rows: dict[str, dict[str, object]]) -> None:
+    def _write_ollaya_results(path: Path, rows: dict[str, dict[str, object]]) -> None:
         output = io.StringIO(newline="")
         writer = csv.DictWriter(output, fieldnames=OLLAYA_RESULTS_COLUMNS, lineterminator="\n")
         writer.writeheader()
         writer.writerows(sorted(rows.values(), key=lambda row: str(row["word"]).casefold()))
-        atomic_write_private(root / OLLAYA_RESULTS_NAME, output.getvalue().encode("utf-8"))
+        atomic_write_private(path, output.getvalue().encode("utf-8"))
+
+    def _ollaya_results_path(self, root: Path, document_id: str) -> Path:
+        self._original_version_id(root, document_id)
+        connection = sqlite3.connect(root / ".blot" / DATABASE_NAME)
+        try:
+            row = connection.execute(
+                "SELECT display_name FROM documents WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise ProjectError("Project document metadata could not be read.") from exc
+        finally:
+            connection.close()
+        if row is None:
+            raise ProjectError("The selected project document was not found.")
+        try:
+            suffix = uuid.UUID(document_id).hex[:8]
+        except ValueError as exc:
+            raise ProjectError("The selected project document was not found.") from exc
+        return root / f"{Path(str(row[0])).name}.{suffix}.ollaya.csv"
 
     def create(self, directory: str | Path, name: str) -> ProjectSummary:
         root = self._validate_directory(directory)
@@ -1155,6 +1197,7 @@ class ProjectService:
 
         if self.ollaya_scorer is not None:
             if candidates:
+                ollaya_results_path = self._ollaya_results_path(root, document_id)
                 max_workers = min(get_ollaya_parallel_runs(), len(candidates))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     scoring = {
@@ -1184,7 +1227,7 @@ class ProjectService:
                             candidate.update(unavailable_score())
                             ollaya_failures += 1
                         apply_common_word_filter(candidate)
-                        self._record_ollaya_result(root, _ollaya_csv_row(candidate))
+                        self._record_ollaya_result(ollaya_results_path, _ollaya_csv_row(candidate))
                         if on_candidate is not None:
                             on_candidate(dict(candidate))
         else:

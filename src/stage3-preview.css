@@ -128,15 +128,119 @@
 }
 
 .ollaya-csv-heading .small-btn {
+  max-width: 175px;
   min-height: 27px;
   padding: 0 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 10px;
 }
 
-.ollaya-csv-editor {
-  padding: 8px;
-  border-bottom: 1px solid var(--border-soft);
+.ollaya-csv-backdrop {
+  z-index: 30;
+  overflow: auto;
+}
+
+.ollaya-csv-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(88vw, 1120px);
+  height: min(80vh, 820px);
+  min-width: 640px;
+  min-height: 340px;
+  max-width: calc(100vw - 36px);
+  max-height: calc(100vh - 36px);
+  padding: 16px;
+  overflow: auto;
+  resize: both;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg);
   background: var(--bg);
+  box-shadow: var(--elev-raised);
+}
+
+.ollaya-csv-dialog-head,
+.ollaya-csv-dialog-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ollaya-csv-dialog-head h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.ollaya-csv-dialog-head code {
+  color: var(--muted);
+  font: 10px var(--font-mono);
+}
+
+.ollaya-csv-close {
+  flex: 0 0 auto;
+  font-size: 18px;
+}
+
+.ollaya-csv-dialog-status {
+  flex: 0 0 auto;
+  min-height: 14px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ollaya-csv-dialog-scroll {
+  flex: 1 1 auto;
+  min-height: 100px;
+  max-height: none;
+  border-radius: var(--radius-sm);
+}
+
+.ollaya-csv-dialog-table {
+  table-layout: fixed;
+  min-width: 0;
+}
+
+.ollaya-csv-dialog-table th,
+.ollaya-csv-dialog-table td {
+  position: relative;
+  min-width: 0 !important;
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ollaya-csv-dialog-table th {
+  padding-right: 12px;
+}
+
+.ollaya-csv-dialog-table th span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ollaya-column-resizer {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: 9px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.ollaya-column-resizer:hover,
+.ollaya-column-resizer:focus-visible {
+  outline: 0;
+  background: color-mix(in oklch, var(--accent) 35%, transparent);
 }
 
 .ollaya-csv-toolbar {
@@ -236,9 +340,21 @@
 }
 
 .ollaya-csv-note {
-  margin: 6px 0 0;
+  flex: 0 0 auto;
+  margin: 0;
   color: var(--muted);
   font-size: 9px;
+}
+
+.ollaya-csv-dialog-actions {
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.ollaya-csv-dialog-actions .primary-btn,
+.ollaya-csv-dialog-actions .text-btn {
+  min-height: 34px;
 }
 
 .manual-candidate-form label,
@@ -906,6 +1022,22 @@
 }
 
 @media (max-width: 620px) {
+  .ollaya-csv-dialog {
+    width: calc(100vw - 24px);
+    height: 78vh;
+    min-width: 280px;
+    min-height: 300px;
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+    padding: 11px;
+  }
+
+  .ollaya-csv-dialog-head h2 {
+    max-width: calc(100vw - 100px);
+    overflow-wrap: anywhere;
+    font-size: 14px;
+  }
+
   .review-toolbar-actions {
     width: 100%;
     justify-content: space-between;

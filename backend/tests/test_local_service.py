@@ -130,7 +130,11 @@ async def test_project_session_has_no_idle_timeout(tmp_path):
 @pytest.mark.anyio
 async def test_ollaya_results_csv_can_be_loaded_and_edited(tmp_path):
     root = tmp_path / "project"
+    source = tmp_path / "cedar.txt"
+    second_source = tmp_path / "northwind.txt"
     root.mkdir()
+    source.write_text("Cedar briefing", encoding="utf-8")
+    second_source.write_text("Northwind summary", encoding="utf-8")
     app, client_context = local_client(tmp_path, MemoryKeyStore())
     row = {
         "word": "Cedar",
@@ -142,27 +146,56 @@ async def test_ollaya_results_csv_can_be_loaded_and_edited(tmp_path):
     async with client_context as client:
         headers = {"X-Local-App-Token": app.state.local_token}
         await client.post("/api/projects", json={"name": "Project", "directory": str(root)}, headers=headers)
-        empty = await client.get("/api/projects/ollaya-results", params={"directory": str(root)}, headers=headers)
+        imported = await client.post(
+            "/api/projects/documents",
+            json={"directory": str(root), "files": [str(source), str(second_source)]},
+            headers=headers,
+        )
+        documents = imported.json()["documents"]
+        document_id = documents[0]["id"]
+        other_document_id = documents[1]["id"]
+        request = {"directory": str(root), "document_id": document_id}
+        empty = await client.get("/api/projects/ollaya-results", params=request, headers=headers)
+        other_empty = await client.get(
+            "/api/projects/ollaya-results",
+            params={"directory": str(root), "document_id": other_document_id},
+            headers=headers,
+        )
         saved = await client.put(
             "/api/projects/ollaya-results/row",
-            json={"directory": str(root), "row": row},
+            json={**request, "row": row},
             headers=headers,
         )
         edited = await client.put(
             "/api/projects/ollaya-results/row",
-            json={"directory": str(root), "previous_word": "Cedar", "row": {**row, "is_correct": "Y"}},
+            json={**request, "previous_word": "Cedar", "row": {**row, "is_correct": "Y"}},
             headers=headers,
         )
-        loaded = await client.get("/api/projects/ollaya-results", params={"directory": str(root)}, headers=headers)
+        bulk_saved = await client.put(
+            "/api/projects/ollaya-results",
+            json={**request, "rows": [{**row, "is_correct": "Y"}], "original_words": ["Cedar"]},
+            headers=headers,
+        )
+        loaded = await client.get("/api/projects/ollaya-results", params=request, headers=headers)
 
     assert empty.status_code == 200
-    assert empty.json() == {"filename": "ollaya_results.csv", "rows": []}
+    assert empty.json() == {
+        "filename": f"cedar.txt.{document_id.replace('-', '')[:8]}.ollaya.csv",
+        "rows": [],
+    }
+    assert other_empty.json()["filename"] != empty.json()["filename"]
+    assert other_empty.json()["rows"] == []
     assert saved.json()["row"]["is_correct"] == "N"
     assert edited.json()["row"]["is_correct"] == "Y"
+    assert bulk_saved.status_code == 200
     assert loaded.json()["rows"] == [{**row, "is_correct": "Y"}]
-    assert (root / "ollaya_results.csv").read_text(encoding="utf-8").splitlines() == [
+    csv_file = root / empty.json()["filename"]
+    assert csv_file.read_text(encoding="utf-8").splitlines() == [
         "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,is_correct",
         "Cedar,0.6,0.7,0.2,Y",
+    ]
+    assert (root / other_empty.json()["filename"]).read_text(encoding="utf-8").splitlines() == [
+        "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,is_correct",
     ]
 
 
@@ -532,7 +565,7 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
         streamed_candidates = [event["candidate"] for event in events if event["type"] == "candidate"]
         csv_response = await client.get(
             "/api/projects/ollaya-results",
-            params={"directory": str(root)},
+            params={"directory": str(root), "document_id": document_id},
             headers=headers,
         )
         assert streamed.status_code == 200
@@ -1064,7 +1097,8 @@ def test_ollaya_results_are_written_before_each_scored_candidate_is_published(tm
     def on_candidate(candidate):
         if candidate["scoreStatus"] == "queued":
             return
-        with (root / "ollaya_results.csv").open(encoding="utf-8", newline="") as csv_file:
+        csv_path = next(root.glob("*.ollaya.csv"))
+        with csv_path.open(encoding="utf-8", newline="") as csv_file:
             rows = list(csv.DictReader(csv_file))
         assert candidate["term"] in {row["word"] for row in rows}
         published_words.append(candidate["term"])
@@ -1073,6 +1107,7 @@ def test_ollaya_results_are_written_before_each_scored_candidate_is_published(tm
     first_word = published_words[0]
     service.update_ollaya_result(
         root,
+        imported.document_id,
         {
             "word": first_word,
             "is_identifier_percent": 0.6,
@@ -1083,7 +1118,8 @@ def test_ollaya_results_are_written_before_each_scored_candidate_is_published(tm
     )
     service.analyze_document_candidates(root, imported.document_id)
 
-    rows = {row["word"]: row for row in service.get_ollaya_results(root)}
+    result_file = service.get_ollaya_results(root, imported.document_id)
+    rows = {row["word"]: row for row in result_file["rows"]}
     assert set(published_words) == set(rows)
     assert rows[first_word] == {
         "word": first_word,

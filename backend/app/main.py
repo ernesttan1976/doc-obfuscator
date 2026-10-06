@@ -178,8 +178,16 @@ class CandidateGroupRequest(BaseModel):
 
 class OllayaResultRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
     row: dict[str, object]
     previous_word: str | None = Field(default=None, max_length=256)
+
+
+class OllayaResultsReplaceRequest(BaseModel):
+    directory: str = Field(min_length=1, max_length=4096)
+    document_id: str = Field(min_length=1, max_length=100)
+    rows: list[dict[str, object]] = Field(max_length=10_000)
+    original_words: list[Annotated[str, Field(max_length=256)]] = Field(max_length=10_000)
 
 
 class ModelDownloadRequest(BaseModel):
@@ -502,10 +510,9 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/projects/ollaya-results")
-    def get_ollaya_results(directory: str) -> dict[str, object]:
+    def get_ollaya_results(directory: str, document_id: str) -> dict[str, object]:
         try:
-            rows = project_service().get_ollaya_results(directory)
-            return {"filename": "ollaya_results.csv", "rows": rows}
+            return project_service().get_ollaya_results(directory, document_id)
         except KeyStoreUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ProjectError as exc:
@@ -516,10 +523,26 @@ def create_app(
         try:
             row = project_service().update_ollaya_result(
                 payload.directory,
+                payload.document_id,
                 payload.row,
                 payload.previous_word,
             )
             return {"row": row}
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/projects/ollaya-results")
+    def replace_ollaya_results(payload: OllayaResultsReplaceRequest) -> dict[str, object]:
+        try:
+            rows = project_service().replace_ollaya_results(
+                payload.directory,
+                payload.document_id,
+                payload.rows,
+                payload.original_words,
+            )
+            return {"rows": rows}
         except KeyStoreUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ProjectError as exc:
