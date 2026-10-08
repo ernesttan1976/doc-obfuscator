@@ -24,6 +24,7 @@ from .candidate_engine import CandidateBlock
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 SCORING_METHOD = "ollaya_yes_no_v6"
+OLLAYA_REQUEST_VERSION = "ollaya_request_v001"
 SCORING_MODEL = os.environ.get("OLLAYA_MODEL", "von:1.1").strip() or "von:1.1"
 MAX_CONTEXT_CHARS = 800
 MAX_CONTEXT_WINDOW_CHARS = 240
@@ -266,6 +267,7 @@ def score_result_from_signals(
         "redactionConfidence": confidence,
         "reviewPriority": priority,
         "scoringMethod": SCORING_METHOD,
+        "ollayaRequestVersion": OLLAYA_REQUEST_VERSION,
         "scoringModel": model,
         "signals": signals,
         "commonWordProbability": common_word_signal.get("probabilityYes"),
@@ -348,6 +350,7 @@ class LocalOllayaScorer:
                 "durationMs": round((time.perf_counter() - started) * 1000, 1),
                 "validSignalCount": signal_count,
                 "request": {
+                    "version": OLLAYA_REQUEST_VERSION,
                     "questions": _QUESTIONS,
                     "state": features,
                     "format": "json",
@@ -594,6 +597,7 @@ def _score_cache_key(model: str, features: dict[str, Any]) -> str:
     request = json.dumps(
         {
             "method": SCORING_METHOD,
+            "request_version": OLLAYA_REQUEST_VERSION,
             "model": model,
             "questions": _QUESTIONS,
             "state": features,

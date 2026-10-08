@@ -1,0 +1,68 @@
+{
+  "version": "ollaya_request_v001",
+  "format_version": 1,
+  "created_at": "2026-10-08",
+  "status": "baseline",
+  "purpose": "Baseline Ollaya candidate scoring request; frozen rollback point.",
+  "model": "OLLAYA_MODEL (default: von:1.1)",
+  "transport": {
+    "command": [
+      "ollaya",
+      "run",
+      "<model>",
+      "--questions",
+      "<questions-json>",
+      "--format",
+      "json",
+      "--state-json"
+    ],
+    "format": "json",
+    "state_template": {
+      "candidate": "<candidate term>",
+      "occurrenceCount": "<integer, when supplied>",
+      "context": "<bounded occurrence contexts, when available>"
+    }
+  },
+  "questions": {
+    "is_identifier": {
+      "type": "choice",
+      "instructions": "Using the candidate and all supplied occurrence contexts, decide whether it actually refers to a specific named entity in this document. Do not infer entity status just because the word was extracted as a candidate, is capitalized, or has an entity label. If an ordinary English word is used with its normal dictionary meaning, answer No; for example, 'abandon' in 'do not abandon the plan' or 'adapt' in 'adapt the plan' is not an identifier. Answer Yes only when the context clearly uses it to name a particular person, organization, project, location, system, or codeword. A common word can still be Yes when the context explicitly uses it as such a name. Consider all supplied occurrences together.",
+      "criteria": {
+        "Yes": "The context clearly uses it to refer to a particular person, organization, project, location, system, codeword, or other specific named entity.",
+        "No": "It is an ordinary English word used with its normal meaning (such as 'abandon' or 'adapt'), ordinary prose, a malformed token, or a reference-number artifact, with no clear use as a specific name."
+      }
+    },
+    "is_operationally_significant": {
+      "type": "choice",
+      "instructions": "Using all supplied occurrence contexts, decide whether the candidate identifies an operational concept in its actual use, rather than merely appearing in the document.",
+      "criteria": {
+        "Yes": "It identifies an activity, capability, vulnerability, plan, resource, or other operationally meaningful concept.",
+        "No": "It does not identify an operationally meaningful concept in the supplied uses."
+      }
+    },
+    "is_common_word": {
+      "type": "choice",
+      "instructions": "Independently decide whether the candidate itself is an ordinary, common English word. Words such as 'abandon' and 'adapt' are common English words. Ignore capitalization and named-entity status for this signal; a common word can still be used as a specific name in context.",
+      "criteria": {
+        "Yes": "This is a common English word, such as 'abandon' or 'adapt', regardless of capitalization or use as a name in context.",
+        "No": "This is uncommon, invented, malformed, or not a common English word."
+      }
+    }
+  },
+  "response_contract": {
+    "type": "choice",
+    "choices": ["Yes", "No"],
+    "include_probability_for_each_signal": true,
+    "decision_threshold": 0.5
+  },
+  "training_csv": {
+    "filename": "RAP_TTP_Procedure_Official_Closed_v1.0-draft09302100.docx.2a945e09.ollaya.csv",
+    "target_columns": [
+      "target_is_identifier",
+      "target_is_operationally_significant",
+      "target_is_common_word"
+    ],
+    "input_columns": ["word"],
+    "context_column": null
+  }
+}
