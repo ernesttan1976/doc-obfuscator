@@ -284,6 +284,72 @@ def test_local_cli_caches_successful_scores_for_identical_inputs(caplog):
     assert [record.ollaya_cache_hit for record in records] == [False, True, False, False]
 
 
+def test_shutdown_terminates_active_ollaya_process_and_unblocks_scoring_thread(monkeypatch):
+    process_started = threading.Event()
+    process_stopped = threading.Event()
+    running_processes = {}
+
+    class BlockingProcess:
+        def __init__(self, command, **_kwargs):
+            self.command = command
+            self.pid = 1234
+            self.returncode = None
+            self.is_model_list = command[-1] == "list"
+            if not self.is_model_list:
+                running_processes[self.pid] = self
+
+        def communicate(self, input=None, timeout=None):
+            if self.is_model_list:
+                self.returncode = 0
+                return "NAME\nvon:1.1 id 1GB now\n", ""
+            process_started.set()
+            if not process_stopped.wait(timeout):
+                raise subprocess.TimeoutExpired(self.command, timeout)
+            return "", ""
+
+        def wait(self, timeout=None):
+            if not process_stopped.wait(timeout):
+                raise subprocess.TimeoutExpired(self.command, timeout)
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+            process_stopped.set()
+
+        def kill(self):
+            self.returncode = -9
+            process_stopped.set()
+
+    def signal_process_group(pid, process_signal):
+        process = running_processes[pid]
+        if process_signal.name == "SIGTERM":
+            process.terminate()
+        else:
+            process.kill()
+
+    monkeypatch.setattr("backend.app.ollaya_scoring.subprocess.Popen", BlockingProcess)
+    monkeypatch.setattr("backend.app.ollaya_scoring.os.killpg", signal_process_group)
+    scorer = LocalOllayaScorer(executable="/usr/local/bin/ollaya", model="von:1.1")
+    errors = []
+
+    def score():
+        try:
+            scorer.score_candidate({"candidate": "test"})
+        except OllayaScoringError as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=score)
+    worker.start()
+    assert process_started.wait(1)
+
+    scorer.shutdown()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert errors
+    assert not scorer._active_processes
+
+
 def test_local_cli_does_not_attempt_to_download_a_missing_model_and_logs_failed_attempt(caplog):
     calls = []
 

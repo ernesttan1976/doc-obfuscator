@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -201,11 +202,20 @@ def create_app(
     ollaya_scorer: LocalOllayaScorer | None = None,
 ) -> FastAPI:
     """Create the local API and, after a frontend build, serve its static UI."""
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        yield
+        shutdown = getattr(application.state.ollaya_scorer, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+
     app = FastAPI(
         title="Blot Local Service",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
     local_token = secrets.token_urlsafe(32)
     dev_origins = _configured_dev_origins()
@@ -673,4 +683,5 @@ def run() -> None:
         reload=False,
         access_log=False,
         log_level=os.environ.get("BLOT_LOG_LEVEL", "warning"),
+        timeout_graceful_shutdown=3,
     )

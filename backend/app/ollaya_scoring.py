@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -281,12 +282,15 @@ class LocalOllayaScorer:
         executable: str | None = None,
         model: str = SCORING_MODEL,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
-        run: Callable[..., Any] = subprocess.run,
+        run: Callable[..., Any] | None = None,
     ) -> None:
         self.executable = executable
         self.model = model
         self.timeout_seconds = timeout_seconds
         self._run = run
+        self._shutdown_event = threading.Event()
+        self._process_lock = threading.Lock()
+        self._active_processes: set[subprocess.Popen[str]] = set()
         self._model_checked = False
         self._model_check_lock = threading.Lock()
         self._score_cache: OrderedDict[str, tuple[Any, dict[str, Any]]] = OrderedDict()
@@ -304,6 +308,24 @@ class LocalOllayaScorer:
     def clear_cache(self) -> None:
         with self._score_cache_lock:
             self._score_cache.clear()
+
+    def shutdown(self) -> None:
+        """Stop active Ollaya CLI process groups and prevent new calls during app exit."""
+        self._shutdown_event.set()
+        with self._process_lock:
+            processes = list(self._active_processes)
+
+        for process in processes:
+            self._signal_process(process, signal.SIGTERM)
+        for process in processes:
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                self._signal_process(process, signal.SIGKILL)
+                try:
+                    process.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    _LOGGER.warning("Ollaya process %s did not exit after shutdown", process.pid)
 
     def score_candidate(self, features: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
@@ -385,6 +407,7 @@ class LocalOllayaScorer:
         executable = self.executable or shutil.which("ollaya")
         if not executable:
             raise OllayaScoringError("The local Ollaya CLI is not installed or is not on PATH.")
+        self._raise_if_shutting_down()
         self._ensure_model_installed(executable)
         command = [
             executable,
@@ -397,13 +420,10 @@ class LocalOllayaScorer:
             "--state-json",
         ]
         try:
-            completed = self._run(
+            completed = self._execute(
                 command,
                 input=json.dumps(features, ensure_ascii=False, separators=(",", ":")),
-                capture_output=True,
-                text=True,
                 timeout=self.timeout_seconds,
-                check=False,
             )
         except subprocess.TimeoutExpired as exc:
             raise OllayaScoringError("Local Ollaya scoring timed out.") from exc
@@ -424,12 +444,9 @@ class LocalOllayaScorer:
             if self._model_checked:
                 return
             try:
-                completed = self._run(
+                completed = self._execute(
                     [executable, "list"],
-                    capture_output=True,
-                    text=True,
                     timeout=min(self.timeout_seconds, 10),
-                    check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise OllayaScoringError("The local Ollaya model list could not be checked.") from exc
@@ -443,6 +460,63 @@ class LocalOllayaScorer:
             if self.model not in installed_models:
                 raise OllayaScoringError("The configured local Ollaya model is not installed.")
             self._model_checked = True
+
+    def _execute(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        input: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self._raise_if_shutting_down()
+        if self._run is not None:
+            return self._run(
+                command,
+                input=input,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+
+        with self._process_lock:
+            self._raise_if_shutting_down()
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=(os.name == "posix"),
+            )
+            self._active_processes.add(process)
+        try:
+            try:
+                stdout, stderr = process.communicate(input=input, timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                self._signal_process(process, signal.SIGKILL)
+                process.communicate()
+                raise exc
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        finally:
+            with self._process_lock:
+                self._active_processes.discard(process)
+
+    def _raise_if_shutting_down(self) -> None:
+        if self._shutdown_event.is_set():
+            raise OllayaScoringError("Ollaya scoring stopped because the application is shutting down.")
+
+    @staticmethod
+    def _signal_process(process: subprocess.Popen[str], process_signal: signal.Signals) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, process_signal)
+            elif process_signal == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+        except (OSError, ProcessLookupError):
+            pass
 
 
 def unavailable_score() -> dict[str, Any]:
