@@ -167,6 +167,7 @@ export default function App() {
   const [ollayaCsvError, setOllayaCsvError] = useState('');
   const [ollayaCsvDirty, setOllayaCsvDirty] = useState(false);
   const [ollayaCsvSaving, setOllayaCsvSaving] = useState(false);
+  const [ollayaCacheClearing, setOllayaCacheClearing] = useState(false);
   const [ollayaColumnWidths, setOllayaColumnWidths] = useState({
     word: 180,
     is_identifier_percent: 190,
@@ -344,6 +345,40 @@ export default function App() {
       setOllayaCsvError(error.message || 'Could not save Ollaya CSV');
     } finally {
       setOllayaCsvSaving(false);
+    }
+  };
+
+  const clearOllayaCache = async () => {
+    if (!activeFile?.id || !projectDirectory || !localToken || ollayaCacheClearing || activeFile.candidateLoading) return;
+    const unsavedWarning = ollayaCsvDirty ? ' Unsaved score edits will be cleared.' : '';
+    if (!window.confirm(`Clear cached Ollaya responses for ${activeFile.name} and rescore this document now? Saved is_correct labels will be kept.${unsavedWarning}`)) return;
+
+    setOllayaCacheClearing(true);
+    setOllayaCsvError('');
+    setOllayaCsvStatus('Clearing cache and rescoring…');
+    csvLoadSequence.current += 1;
+    setOllayaRows([]);
+    setOllayaCsvDirty(false);
+    try {
+      const query = new URLSearchParams({ directory: projectDirectory, document_id: activeFile.id });
+      const response = await fetch(`/api/projects/ollaya-results?${query}`, {
+        method: 'DELETE',
+        headers: { 'X-Local-App-Token': localToken },
+        cache: 'no-store',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not clear the Ollaya response cache');
+      const rescored = await loadProjectDocumentCandidates(activeFile.id, [], projectDirectory);
+      await reloadOllayaCsv(activeFile.id, projectDirectory, { merge: false });
+      setToast(rescored
+        ? `Cleared ${data.clearedCount} cached Ollaya response${data.clearedCount === 1 ? '' : 's'} and rescored ${activeFile.name}`
+        : `Cleared cached Ollaya responses, but ${activeFile.name} could not be rescored`);
+    } catch (error) {
+      setOllayaCsvStatus('');
+      setOllayaCsvError(error.message || 'Could not clear the Ollaya response cache');
+      setToast(error.message || 'Could not clear the Ollaya response cache');
+    } finally {
+      setOllayaCacheClearing(false);
     }
   };
 
@@ -1855,13 +1890,13 @@ export default function App() {
             </th>)}</tr></thead>
             <tbody>{ollayaRows.map((row, rowIndex) => <tr key={`${row._documentId}-${row._originalWord || row.word}-${rowIndex}`}>
               {OLLAYA_CSV_COLUMNS.map(([column]) => <td key={column}>{column === 'is_correct'
-                ? <select aria-label={`${row.word} is_correct`} value={row[column] || 'N'} disabled={ollayaCsvSaving} onChange={(event) => editOllayaCsvCell(rowIndex, column, event.target.value)}><option value="N">N</option><option value="Y">Y</option></select>
-                : <input aria-label={`${row.word} ${column}`} type={column.endsWith('_percent') ? 'number' : 'text'} min={column.endsWith('_percent') ? 0 : undefined} max={column.endsWith('_percent') ? 1 : undefined} step={column.endsWith('_percent') ? 0.01 : undefined} maxLength={column === 'word' ? 256 : undefined} value={row[column] ?? ''} disabled={ollayaCsvSaving} onChange={(event) => editOllayaCsvCell(rowIndex, column, event.target.value)} />}</td>)}
+                ? <select aria-label={`${row.word} is_correct`} value={row[column] || 'N'} disabled={ollayaCsvSaving || ollayaCacheClearing} onChange={(event) => editOllayaCsvCell(rowIndex, column, event.target.value)}><option value="N">N</option><option value="Y">Y</option></select>
+                : <input aria-label={`${row.word} ${column}`} type={column.endsWith('_percent') ? 'number' : 'text'} min={column.endsWith('_percent') ? 0 : undefined} max={column.endsWith('_percent') ? 1 : undefined} step={column.endsWith('_percent') ? 0.01 : undefined} maxLength={column === 'word' ? 256 : undefined} value={row[column] ?? ''} disabled={ollayaCsvSaving || ollayaCacheClearing} onChange={(event) => editOllayaCsvCell(rowIndex, column, event.target.value)} />}</td>)}
             </tr>)}
             {!ollayaRows.length && <tr><td className="ollaya-csv-empty" colSpan={OLLAYA_CSV_COLUMNS.length}>{ollayaCsvError || (ollayaCsvStatus === 'Loading CSV…' ? ollayaCsvStatus : 'Results will appear as Ollaya scores this file.')}</td></tr>}
           </tbody></table></div>
           <p className="ollaya-csv-note">Probabilities use 0–1 values. Each source file has its own CSV. is_correct defaults to N.</p>
-          <footer className="ollaya-csv-dialog-actions"><button className="text-btn" type="button" onClick={closeOllayaCsv}>Close</button><button className="primary-btn" type="button" onClick={saveOllayaCsv} disabled={ollayaCsvSaving || !ollayaCsvDirty}>{ollayaCsvSaving ? 'Saving…' : 'Save'}</button></footer>
+          <footer className="ollaya-csv-dialog-actions"><button className="text-btn" type="button" onClick={closeOllayaCsv}>Close</button><button className="text-btn" type="button" onClick={clearOllayaCache} disabled={ollayaCsvSaving || ollayaCacheClearing || activeFile.candidateLoading}>{ollayaCacheClearing ? 'Clearing & rescoring…' : 'Clear response cache'}</button><button className="primary-btn" type="button" onClick={saveOllayaCsv} disabled={ollayaCsvSaving || ollayaCacheClearing || !ollayaCsvDirty}>{ollayaCsvSaving ? 'Saving…' : 'Save'}</button></footer>
         </section>
       </div>}
       {exportPreview && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !exportBusy) setExportPreview(null); }}><section className="modal export-preview-modal" role="dialog" aria-modal="true" aria-labelledby="export-preview-title" aria-describedby="export-preview-description"><h2 id="export-preview-title">Review obfuscated copy</h2><p id="export-preview-description">{exportPreview.outputName} · {exportPreview.matchCount} supported-text occurrences will change. This preview does not modify the original.</p><div className="export-preview-content"><h3>Selected replacements</h3><ul className="export-match-list">{exportPreview.matches.map((match) => <li key={match.candidateId}><span><strong>{match.term}</strong> · {match.occurrenceCount} {match.occurrenceCount === 1 ? 'match' : 'matches'}</span><code>{match.token}</code></li>)}</ul><h3>Output preview · {exportPreview.format}</h3><pre>{exportPreviewText || 'No supported text is present in this preview.'}</pre><h3>Coverage and warnings</h3>{exportPreview.warnings.length ? <ul className="export-warning-list">{exportPreview.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul> : <p>No adapter warnings were reported. This is not a guarantee that all sensitive information was found.</p>}<p>Only adapter-supported editable text is processed. Images/OCR, metadata, macros, embedded binary content, and unhandled text surfaces are not sanitized. The private replacement map remains encrypted in this project and is not included in the output file.</p></div>{exportPreview.requiresAcknowledgement && <label className="export-warning-ack"><input type="checkbox" checked={exportAcknowledged} onChange={(event) => setExportAcknowledged(event.target.checked)} /><span>I reviewed the coverage and placeholder warnings and understand unsupported or unrecognized content may remain.</span></label>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setExportPreview(null)} disabled={exportBusy}>Cancel</button><button className="primary-btn" type="button" onClick={approveProjectExport} disabled={exportBusy || (exportPreview.requiresAcknowledgement && !exportAcknowledged)}>{exportBusy ? 'Saving version…' : 'Approve and save new version'}</button></div></section></div>}

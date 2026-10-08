@@ -177,6 +177,13 @@ async def test_ollaya_results_csv_can_be_loaded_and_edited(tmp_path):
             headers=headers,
         )
         loaded = await client.get("/api/projects/ollaya-results", params=request, headers=headers)
+        cleared = await client.delete("/api/projects/ollaya-results", params=request, headers=headers)
+        after_clear = await client.get("/api/projects/ollaya-results", params=request, headers=headers)
+        other_after_clear = await client.get(
+            "/api/projects/ollaya-results",
+            params={"directory": str(root), "document_id": other_document_id},
+            headers=headers,
+        )
 
     assert empty.status_code == 200
     assert empty.json() == {
@@ -189,10 +196,19 @@ async def test_ollaya_results_csv_can_be_loaded_and_edited(tmp_path):
     assert edited.json()["row"]["is_correct"] == "Y"
     assert bulk_saved.status_code == 200
     assert loaded.json()["rows"] == [{**row, "is_correct": "Y"}]
+    assert cleared.json()["clearedCount"] == 1
+    assert after_clear.json()["rows"] == [{
+        "word": "Cedar",
+        "is_identifier_percent": "",
+        "is_operationally_significant_percent": "",
+        "is_common_word_percent": "",
+        "is_correct": "Y",
+    }]
+    assert other_after_clear.json()["rows"] == []
     csv_file = root / empty.json()["filename"]
     assert csv_file.read_text(encoding="utf-8").splitlines() == [
         "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,is_correct",
-        "Cedar,0.6,0.7,0.2,Y",
+        "Cedar,,,,Y",
     ]
     assert (root / other_empty.json()["filename"]).read_text(encoding="utf-8").splitlines() == [
         "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,is_correct",

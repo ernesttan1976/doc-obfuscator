@@ -218,6 +218,31 @@ class ProjectService:
                 self._write_ollaya_results(path, {})
             return {"filename": path.name, "rows": rows}
 
+    def clear_ollaya_results(self, directory: str | Path, document_id: str) -> dict[str, object]:
+        root = self._validate_directory(directory)
+        self.open(root)
+        path = self._ollaya_results_path(root, document_id)
+        with self._ollaya_results_lock:
+            rows = self._read_ollaya_results(path)
+            cleared_count = sum(
+                any(row.get(column) not in (None, "") for column in OLLAYA_RESULTS_COLUMNS[1:4])
+                for row in rows
+            )
+            reset_rows = {
+                str(row["word"]).casefold(): {
+                    **row,
+                    **{column: "" for column in OLLAYA_RESULTS_COLUMNS[1:4]},
+                }
+                for row in rows
+            }
+            self._write_ollaya_results(path, reset_rows)
+            self._ollaya_results_cache[str(path)] = reset_rows
+
+        clear_scorer_cache = getattr(self.ollaya_scorer, "clear_cache", None)
+        if callable(clear_scorer_cache):
+            clear_scorer_cache()
+        return {"filename": path.name, "clearedCount": cleared_count}
+
     def update_ollaya_result(
         self,
         directory: str | Path,
@@ -1234,7 +1259,10 @@ class ProjectService:
         candidates_to_score = []
         for candidate in candidates:
             saved = saved_by_word.get(str(candidate.get("term", "")).casefold())
-            if saved is None:
+            has_saved_response = saved is not None and any(
+                saved.get(column) not in (None, "") for column in OLLAYA_RESULTS_COLUMNS[1:4]
+            )
+            if not has_saved_response:
                 candidates_to_score.append(candidate)
                 continue
             score_status = _apply_saved_ollaya_result(

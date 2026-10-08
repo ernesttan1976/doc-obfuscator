@@ -268,11 +268,13 @@ def test_local_cli_caches_successful_scores_for_identical_inputs(caplog):
         first["signals"]["isIdentifier"]["answer"] = "No"
         second = scorer.score_candidate({"context": features["context"], "candidate": features["candidate"]})
         scorer.score_candidate({**features, "context": "A different context."})
+        scorer.clear_cache()
+        scorer.score_candidate(features)
 
-    assert len(scoring_calls) == 2
+    assert len(scoring_calls) == 3
     assert second["signals"]["isIdentifier"]["answer"] == "Yes"
     records = [record for record in caplog.records if getattr(record, "ollaya_event", None) == "candidate_scoring_call"]
-    assert [record.ollaya_cache_hit for record in records] == [False, True, False]
+    assert [record.ollaya_cache_hit for record in records] == [False, True, False, False]
 
 
 def test_local_cli_does_not_attempt_to_download_a_missing_model_and_logs_failed_attempt(caplog):
@@ -386,10 +388,15 @@ def test_project_analysis_reuses_saved_csv_scores_without_calling_ollaya(tmp_pat
     reloaded_scorer = Scorer()
     reloaded_service = ProjectService(key_store, ollaya_scorer=reloaded_scorer)
     reloaded = reloaded_service.analyze_document_candidates(project_dir, document.document_id)
+    cached_call_count = reloaded_scorer.calls
     by_term = {candidate["term"]: candidate for candidate in reloaded["candidates"]}
+    cleared = reloaded_service.clear_ollaya_results(project_dir, document.document_id)
+    rescored = reloaded_service.analyze_document_candidates(project_dir, document.document_id)
 
     assert initial_scorer.calls == len(initial["candidates"])
-    assert reloaded_scorer.calls == 0
+    assert cached_call_count == 0
+    assert cleared["clearedCount"] == len(initial["candidates"])
+    assert reloaded_scorer.calls == len(rescored["candidates"])
     assert reloaded["ollayaStatus"] == "ready"
     assert all(candidate["scoreStatus"] == "complete" for candidate in reloaded["candidates"])
     assert by_term["Alex"]["signals"]["isIdentifier"]["probabilityYes"] == 0.91

@@ -518,6 +518,15 @@ def create_app(
         except ProjectError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.delete("/api/projects/ollaya-results")
+    def clear_ollaya_results(directory: str, document_id: str) -> dict[str, object]:
+        try:
+            return project_service().clear_ollaya_results(directory, document_id)
+        except KeyStoreUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProjectError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.put("/api/projects/ollaya-results/row")
     def update_ollaya_result(payload: OllayaResultRequest) -> dict[str, object]:
         try:

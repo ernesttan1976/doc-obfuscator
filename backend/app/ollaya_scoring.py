@@ -294,6 +294,10 @@ class LocalOllayaScorer:
             "interface": "local-cli",
         }
 
+    def clear_cache(self) -> None:
+        with self._score_cache_lock:
+            self._score_cache.clear()
+
     def score_candidate(self, features: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
         outcome = "unavailable"
