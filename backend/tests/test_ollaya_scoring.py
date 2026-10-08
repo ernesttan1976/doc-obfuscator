@@ -10,8 +10,15 @@ import pytest
 from backend.app.candidate_engine import CandidateBlock
 from backend.app.key_store import KeyStoreUnavailable
 from backend.app.ollaya_scoring import (
+    _QUESTIONS,
+    DOTENV_PATH,
+    OLLAYA_REQUEST_VERSION,
+    OLLAYA_REQUESTS_DIRECTORY,
+    SCORING_MODEL,
     LocalOllayaScorer,
     OllayaScoringError,
+    _load_latest_ollaya_request,
+    _load_scoring_model,
     apply_common_word_filter,
     build_ollaya_scoring_input,
     confidence_to_priority,
@@ -21,6 +28,50 @@ from backend.app.ollaya_scoring import (
     validate_ollaya_response,
 )
 from backend.app.projects import ProjectService
+
+
+def test_latest_ollaya_request_manifest_is_loaded_by_numeric_version(tmp_path):
+    baseline_path = OLLAYA_REQUESTS_DIRECTORY / f"{OLLAYA_REQUEST_VERSION}.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert baseline["questions"] == _QUESTIONS
+
+    for version in ("ollaya_request_v002", "ollaya_request_v010"):
+        manifest = json.loads(json.dumps(baseline))
+        manifest["version"] = version
+        manifest["questions"]["is_identifier"]["instructions"] = version
+        (tmp_path / f"{version}.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    version, questions = _load_latest_ollaya_request(tmp_path)
+
+    assert version == "ollaya_request_v010"
+    assert questions["is_identifier"]["instructions"] == "ollaya_request_v010"
+
+
+def test_latest_ollaya_request_manifest_rejects_invalid_newer_version(tmp_path):
+    baseline_path = OLLAYA_REQUESTS_DIRECTORY / f"{OLLAYA_REQUEST_VERSION}.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    (tmp_path / "ollaya_request_v001.json").write_text(json.dumps(baseline), encoding="utf-8")
+    (tmp_path / "ollaya_request_v002.json").write_text("{invalid json", encoding="utf-8")
+
+    with pytest.raises(OllayaScoringError, match="latest Ollaya request manifest"):
+        _load_latest_ollaya_request(tmp_path)
+
+
+def test_scoring_model_is_read_from_dotenv_and_not_process_environment(tmp_path, monkeypatch):
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text('OLLAYA_MODEL="configured:7"\n', encoding="utf-8")
+    monkeypatch.setenv("OLLAYA_MODEL", "shell-override:9")
+
+    assert _load_scoring_model(dotenv_path) == "configured:7"
+    assert _load_scoring_model(DOTENV_PATH) == SCORING_MODEL
+
+
+def test_scoring_model_requires_an_explicit_dotenv_value(tmp_path):
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text("# OLLAYA_MODEL=example:1\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Set a non-empty OLLAYA_MODEL"):
+        _load_scoring_model(dotenv_path)
 
 
 def test_input_builder_sends_bounded_context_and_candidate_metadata():
@@ -103,7 +154,7 @@ def test_signal_validation_confidence_and_automatic_suggestion_rules():
             },
         },
     }
-    signals = validate_ollaya_response(response)
+    signals = validate_ollaya_response(response, expected_model="von:1.1")
     result = score_result_from_signals(signals)
     assert result["redactionConfidence"] == 0.83
     assert result["reviewPriority"] == 4
@@ -134,11 +185,11 @@ def test_contradictory_or_missing_signal_is_unavailable_not_a_no():
             },
         },
     }
-    signals = validate_ollaya_response(response)
+    signals = validate_ollaya_response(response, expected_model="von:1.1")
     assert signals == {}
     assert score_result_from_signals(signals)["scoreStatus"] == "unavailable"
     with pytest.raises(OllayaScoringError):
-        validate_ollaya_response({"model": "laya:en", "answers": {}})
+        validate_ollaya_response({"model": "laya:en", "answers": {}}, expected_model="von:1.1")
 
     partial = validate_ollaya_response({
         "model": "von:1.1",
@@ -147,7 +198,7 @@ def test_contradictory_or_missing_signal_is_unavailable_not_a_no():
                 "type": "choice", "choice": "Yes", "probabilities": {"Yes": 0.8, "No": 0.2}
             },
         },
-    })
+    }, expected_model="von:1.1")
     assert score_result_from_signals(partial)["scoreStatus"] == "partial"
 
 
@@ -202,7 +253,9 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
         )
 
     with caplog.at_level(logging.INFO, logger="backend.app.ollaya_scoring"):
-        result = LocalOllayaScorer(executable="/usr/local/bin/ollaya", run=fake_run).score_candidate(
+        result = LocalOllayaScorer(
+            executable="/usr/local/bin/ollaya", model="von:1.1", run=fake_run
+        ).score_candidate(
             {"candidate": "Private Project", "context": "Private context phrase"}
         )
 
@@ -270,7 +323,9 @@ def test_local_cli_caches_successful_scores_for_identical_inputs(caplog):
             stderr="",
         )
 
-    scorer = LocalOllayaScorer(executable="/usr/local/bin/ollaya", run=fake_run)
+    scorer = LocalOllayaScorer(
+        executable="/usr/local/bin/ollaya", model="von:1.1", run=fake_run
+    )
     features = {"candidate": "Private Project", "context": "A short private context."}
     with caplog.at_level(logging.INFO, logger="backend.app.ollaya_scoring"):
         first = scorer.score_candidate(features)

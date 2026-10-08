@@ -32,7 +32,7 @@ def test_local_ollaya_scorer_logs_raw_outputs_and_requests(tmp_path, monkeypatch
 
     monkeypatch.setattr("backend.app.prompt_iteration.shutil.which", lambda _name: "/usr/bin/ollaya")
     monkeypatch.setattr("backend.app.prompt_iteration.subprocess.run", fake_run)
-    scorer = _LocalOllayaPromptScorer(log_path=log_path)
+    scorer = _LocalOllayaPromptScorer(model="von:1.1", log_path=log_path)
 
     result = scorer.score({"candidate": "Falcon", "context": "Falcon launches at dawn."}, "Review entities")
 

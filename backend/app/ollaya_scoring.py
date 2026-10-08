@@ -17,15 +17,25 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from .candidate_engine import CandidateBlock
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(DOTENV_PATH)
+
+
+def _load_scoring_model(dotenv_path: Path) -> str:
+    """Read the configured model from .env; do not silently substitute a model tag."""
+    model = dotenv_values(dotenv_path).get("OLLAYA_MODEL")
+    if not isinstance(model, str) or not model.strip():
+        raise RuntimeError(f"Set a non-empty OLLAYA_MODEL in {dotenv_path}.")
+    return model.strip()
+
 
 SCORING_METHOD = "ollaya_yes_no_v6"
-OLLAYA_REQUEST_VERSION = "ollaya_request_v001"
-SCORING_MODEL = os.environ.get("OLLAYA_MODEL", "von:1.1").strip() or "von:1.1"
+SCORING_MODEL = _load_scoring_model(DOTENV_PATH)
+OLLAYA_REQUESTS_DIRECTORY = Path(__file__).resolve().parents[2] / "ollaya_requests"
 MAX_CONTEXT_CHARS = 800
 MAX_CONTEXT_WINDOW_CHARS = 240
 MAX_CONTEXT_SAMPLES = 3
@@ -40,51 +50,6 @@ def get_ollaya_parallel_runs() -> int:
     except (AttributeError, ValueError):
         return 1
 
-
-_QUESTIONS = {
-    "is_identifier": {
-        "type": "choice",
-        "instructions": (
-            "Using the candidate and all supplied occurrence contexts, decide whether it actually "
-            "refers to a specific named entity in this document. Do not infer entity status just "
-            "because the word was extracted as a candidate, is capitalized, or has an entity label. "
-            "If an ordinary English word is used with its normal dictionary meaning, answer No; "
-            "for example, 'abandon' in 'do not abandon the plan' or 'adapt' in 'adapt the plan' "
-            "is not an identifier. Answer Yes only when the context clearly uses it to name a "
-            "particular person, organization, project, location, system, or codeword. A common word "
-            "can still be Yes when the context explicitly uses it as such a name. Consider all "
-            "supplied occurrences together."
-        ),
-        "criteria": {
-            "Yes": "The context clearly uses it to refer to a particular person, organization, project, location, system, codeword, or other specific named entity.",
-            "No": "It is an ordinary English word used with its normal meaning (such as 'abandon' or 'adapt'), ordinary prose, a malformed token, or a reference-number artifact, with no clear use as a specific name.",
-        },
-    },
-    "is_operationally_significant": {
-        "type": "choice",
-        "instructions": (
-            "Using all supplied occurrence contexts, decide whether the candidate identifies "
-            "an operational concept in its actual use, rather than merely appearing in the document."
-        ),
-        "criteria": {
-            "Yes": "It identifies an activity, capability, vulnerability, plan, resource, or other operationally meaningful concept.",
-            "No": "It does not identify an operationally meaningful concept in the supplied uses.",
-        },
-    },
-    "is_common_word": {
-        "type": "choice",
-        "instructions": (
-            "Independently decide whether the candidate itself is an ordinary, common English "
-            "word. Words such as 'abandon' and 'adapt' are common English words. Ignore "
-            "capitalization and named-entity status for this signal; a common word can still be "
-            "used as a specific name in context."
-        ),
-        "criteria": {
-            "Yes": "This is a common English word, such as 'abandon' or 'adapt', regardless of capitalization or use as a name in context.",
-            "No": "This is uncommon, invented, malformed, or not a common English word.",
-        },
-    },
-}
 
 _SENTENCE_BOUNDARY = re.compile(r"[.!?;\n]")
 _SIGNAL_NAMES = {
@@ -105,6 +70,86 @@ _LOGGER = logging.getLogger(__name__)
 
 class OllayaScoringError(Exception):
     """The local Ollaya CLI or its response is unavailable or invalid."""
+
+
+_REQUEST_VERSION_PATTERN = re.compile(r"^ollaya_request_v(\d{3,})\.json$")
+_EXPECTED_QUESTION_NAMES = {
+    "is_identifier",
+    "is_operationally_significant",
+    "is_common_word",
+}
+
+
+def _load_latest_ollaya_request(
+    requests_directory: Path | None = None,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    """Load and validate the numerically newest immutable request manifest."""
+    requests_directory = requests_directory or OLLAYA_REQUESTS_DIRECTORY
+    versions = []
+    try:
+        for path in requests_directory.iterdir():
+            match = _REQUEST_VERSION_PATTERN.fullmatch(path.name)
+            if match and path.is_file():
+                versions.append((int(match.group(1)), path))
+    except OSError as exc:
+        raise OllayaScoringError(
+            f"Could not read Ollaya request versions from {requests_directory}."
+        ) from exc
+
+    if not versions:
+        raise OllayaScoringError(
+            f"No versioned Ollaya request manifests found in {requests_directory}."
+        )
+
+    _, latest_path = max(versions, key=lambda item: item[0])
+    try:
+        manifest = json.loads(latest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OllayaScoringError(
+            f"Could not load latest Ollaya request manifest {latest_path.name}."
+        ) from exc
+
+    expected_version = latest_path.stem
+    if not isinstance(manifest, dict) or manifest.get("version") != expected_version:
+        raise OllayaScoringError(
+            f"Ollaya request manifest {latest_path.name} has a mismatched version field."
+        )
+    format_version = manifest.get("format_version")
+    if isinstance(format_version, bool) or format_version != 1:
+        raise OllayaScoringError(
+            f"Ollaya request manifest {latest_path.name} uses an unsupported format version."
+        )
+    if not isinstance(manifest.get("transport"), dict) or manifest["transport"].get("format") != "json":
+        raise OllayaScoringError(
+            f"Ollaya request manifest {latest_path.name} has an invalid transport format."
+        )
+
+    questions = manifest.get("questions")
+    if not isinstance(questions, dict) or set(questions) != _EXPECTED_QUESTION_NAMES:
+        raise OllayaScoringError(
+            f"Ollaya request manifest {latest_path.name} must define exactly the three scoring questions."
+        )
+    for name, question in questions.items():
+        criteria = question.get("criteria") if isinstance(question, dict) else None
+        if (
+            not isinstance(question, dict)
+            or question.get("type") != "choice"
+            or not isinstance(question.get("instructions"), str)
+            or not question["instructions"].strip()
+            or not isinstance(criteria, dict)
+            or not all(
+                isinstance(criteria.get(choice), str) and criteria[choice].strip()
+                for choice in ("Yes", "No")
+            )
+        ):
+            raise OllayaScoringError(
+                f"Ollaya request manifest {latest_path.name} has an invalid {name} question."
+            )
+
+    return expected_version, questions
+
+
+OLLAYA_REQUEST_VERSION, _QUESTIONS = _load_latest_ollaya_request()
 
 
 def build_ollaya_scoring_input(

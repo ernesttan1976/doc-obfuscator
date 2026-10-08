@@ -4,7 +4,7 @@
   "created_at": "2026-10-08",
   "status": "baseline",
   "purpose": "Baseline Ollaya candidate scoring request; frozen rollback point.",
-  "model": "OLLAYA_MODEL (default: von:1.1)",
+  "model": "Read from the repository .env key OLLAYA_MODEL",
   "transport": {
     "command": [
       "ollaya",
