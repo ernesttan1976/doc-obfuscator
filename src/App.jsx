@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { getCandidateDecisionCounts, getCandidatesMatchingSignal, getCandidatesNotSelectedAtLevel, getIncludedCandidates, getReviewCandidates, getVisibleCandidates, isCandidateAutoSuggested, upsertCandidate } from './candidate-review.js';
+import { getCandidateDecisionCounts, getCandidatesNotSelectedAtLevel, getIncludedCandidates, getVisibleCandidates, isCandidateAutoSuggested, upsertCandidate } from './candidate-review.js';
 import { findPageTermMatches, mapClientPointToLayer, mapClientRectToLayer } from './page-highlights.js';
 import './stage3-preview.css';
 
@@ -198,13 +198,6 @@ export default function App() {
   const activeProjectRestoreAttempted = useRef(false);
   const [manualPhrase, setManualPhrase] = useState('');
   const [mergeGroupIds, setMergeGroupIds] = useState([]);
-  const [selectedCandidateIds, setSelectedCandidateIds] = useState([]);
-  const [bulkSelectedCandidateIds, setBulkSelectedCandidateIds] = useState([]);
-  const [candidateBulkBusy, setCandidateBulkBusy] = useState(false);
-  const [signalThresholds, setSignalThresholds] = useState({
-    isIdentifier: 80,
-    isOperationallySignificant: 80,
-  });
   const [toast, setToast] = useState('');
   const [undo, setUndo] = useState(null);
   const [termContextMenu, setTermContextMenu] = useState(null);
@@ -234,9 +227,6 @@ export default function App() {
     return occurrences ? [{ group, members, occurrences, decision: decisions[group.id] }] : [];
   });
   const candidates = activeFile.candidates || [];
-  const queriedCandidateCount = candidates.filter((candidate) => (
-    ['complete', 'partial', 'unavailable'].includes(candidate.scoreStatus)
-  )).length;
   const matchCount = reviewableProjectDocument
     ? candidates
       .filter((candidate) => candidate.level >= 2 && candidate.level <= level && isCandidateAutoSuggested(candidate))
@@ -245,17 +235,12 @@ export default function App() {
   const visibleCandidates = reviewableProjectDocument
     ? getVisibleCandidates(candidates, level)
     : [];
-  const reviewCandidates = reviewableProjectDocument ? getReviewCandidates(candidates) : [];
   const includedCandidates = reviewableProjectDocument ? getIncludedCandidates(candidates) : [];
   const levelCandidates = visibleCandidates;
   const candidatesById = Object.fromEntries(candidates.map((candidate) => [candidate.id, candidate]));
   const candidateGroups = activeFile.candidateGroups || [];
-  const groupedCandidateIds = new Set(candidateGroups.flatMap((group) => group.candidateIds));
   const candidateDecisionCounts = getCandidateDecisionCounts(candidates);
   const notIncludedByLevelCount = getCandidatesNotSelectedAtLevel(candidates, level);
-  const previewCoverage = activeFile.previewCoverage;
-  const previewWarnings = activeFile.previewWarnings || [];
-  const unsupportedPartCount = previewCoverage?.unsupportedPartCount || 0;
   const exportPreviewText = exportPreview ? previewLines(exportPreview.preview).join('\n') : '';
 
   const editOllayaCsvCell = (rowIndex, column, value) => {
@@ -811,8 +796,6 @@ export default function App() {
         ? { ...file, candidates: [], candidateLoading: true, candidateProgress: 0, candidateError: '' }
         : file
     )));
-    setSelectedCandidateIds([]);
-    setBulkSelectedCandidateIds([]);
     try {
       const response = await fetch('/api/projects/document-candidates/stream', {
         method: 'POST',
@@ -1075,46 +1058,6 @@ export default function App() {
     }
   };
 
-  const applyBulkCandidateDecision = async (candidateIds, decision) => {
-    const ids = [...new Set(candidateIds)];
-    if (!ids.length || !activeFile.isProjectDocument || !localToken) return;
-    setCandidateBulkBusy(true);
-    try {
-      const response = await fetch('/api/projects/candidate-decisions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Local-App-Token': localToken },
-        body: JSON.stringify({
-          directory: projectDirectory,
-          document_id: activeFile.id,
-          candidate_ids: ids,
-          decision,
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Could not update candidate decisions');
-      setExportPreview(null);
-      setFiles((current) => current.map((file) => (
-        file.id === activeFile.id ? { ...file, candidates: data.candidates } : file
-      )));
-      setBulkSelectedCandidateIds([]);
-      setToast(`${decision === 'included' ? 'Included' : 'Excluded'} ${ids.length} candidate${ids.length === 1 ? '' : 's'}`);
-    } catch (error) {
-      setToast(error.message || 'Could not update candidate decisions');
-    } finally {
-      setCandidateBulkBusy(false);
-    }
-  };
-
-  const selectCandidatesBySignal = (signalName) => {
-    const selected = getCandidatesMatchingSignal(
-      reviewCandidates,
-      signalName,
-      signalThresholds[signalName],
-    ).map((candidate) => candidate.id);
-    setBulkSelectedCandidateIds((current) => [...new Set([...current, ...selected])]);
-    setToast(`Added matching candidates to the current selection`);
-  };
-
   const addManualCandidate = async (event) => {
     event.preventDefault();
     const phrase = manualPhrase.trim();
@@ -1150,7 +1093,6 @@ export default function App() {
         file.id === activeFile.id ? { ...file, candidateGroups: data.groups } : file
       )));
       setMergeGroupIds([]);
-      setSelectedCandidateIds([]);
       setToast(operation === 'add' ? 'Created a confirmed group. It remains separate from candidate Include/Exclude decisions.' : 'Updated confirmed group membership');
     } catch (error) {
       setToast(error.message || 'Could not update confirmed groups');
@@ -1745,8 +1687,6 @@ export default function App() {
     setView('preview');
     setUndo(null);
     setMergeGroupIds([]);
-    setSelectedCandidateIds([]);
-    setBulkSelectedCandidateIds([]);
     setManualPhrase('');
     setToast(`Opened ${file.name} · original remains unchanged`);
     const selectedVersion = file.versions?.find((version) => version.id === file.selectedVersionId);
@@ -1775,11 +1715,11 @@ export default function App() {
             <aside className="panel file-panel"><div className="panel-head"><span className="panel-title">{currentProject ? 'Project documents' : 'Project files'}</span><span className="panel-meta">{currentProject ? `${projectDocuments.length} saved` : `${files.length} items`}</span></div><div className="file-list">{(currentProject ? projectDocuments : files).map((file) => <button key={file.id || file.name} className={`file-item ${(file.id || file.name) === activeName ? 'active' : ''}`} onClick={() => switchFile(file)}><span className="file-type">{file.type}</span><span className="file-copy"><span className="file-name">{file.name}</span><span className="file-status">{file.status}</span></span><span className="file-check">{(file.id || file.name) === activeName ? '●' : file.status.includes('Ready') ? '✓' : ''}</span></button>)}{currentProject && projectDocuments.length === 0 && <p className="empty-file-list">No project documents yet.</p>}</div></aside>
             <section className="panel review-panel">
                <div className="review-toolbar"><div className="review-title"><strong>{activeFile.name}</strong><span>{activeFile.isProjectDocument ? `${activeVersion.kind === 'original' ? 'Saved original' : activeVersion.kind === 'restored' ? 'Restored copy' : 'Obfuscated copy'} · local preview` : `Editable text preview · local${activeFile.type === 'PPTX' ? ` · ${activeFile.content.length} slides` : ''}`}</span></div><div className="review-toolbar-actions">{activeFile.isProjectDocument && <label className="version-select">Version<select aria-label="Select document version" value={activeFile.selectedVersionId || activeFile.versionId} onChange={(event) => selectProjectVersion(event.target.value)}>{(activeFile.versions || []).map((version) => <option key={version.id} value={version.id}>{version.kind === 'original' ? 'Original' : version.kind === 'restored' ? 'Restored' : 'Obfuscated'} · {version.name}</option>)}</select></label>}<div className="view-switch" role="group" aria-label="Document view"><button type="button" className={view === 'preview' ? 'active' : ''} aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button><button type="button" className={view === 'changes' ? 'active' : ''} aria-pressed={view === 'changes'} onClick={() => setView('changes')}>Changes <span>{matchCount}</span></button></div></div></div>
-                 {reviewableProjectDocument && <div className="priority-area"><fieldset className="priority-fieldset"><legend>Obfuscation level</legend><div className="priority-scale" aria-hidden="true"><span>1 · 0%</span><strong>Level {level}</strong><span>10 · 100%</span></div><input className="priority-slider" type="range" min="1" max="10" step="1" value={level} aria-label="Obfuscation level" aria-valuetext={`Level ${level}: ${level === 1 ? '0% obfuscation; no terms selected' : level === 10 ? '100% obfuscation; priorities 2 through 10 selected' : `priorities 2 through ${level} selected`}`} onChange={(event) => { setExportPreview(null); setBulkSelectedCandidateIds([]); setLevel(Number(event.target.value)); }} /><p className="priority-help">Priorities run from 2 (most sensitive) to 10 (least sensitive). Level 1 selects none; level 10 selects priorities 2–10.</p></fieldset></div>}
+                  {reviewableProjectDocument && <div className="priority-area"><fieldset className="priority-fieldset"><legend>Obfuscation level</legend><div className="priority-scale" aria-hidden="true"><span>1 · 0%</span><strong>Level {level}</strong><span>10 · 100%</span></div><input className="priority-slider" type="range" min="1" max="10" step="1" value={level} aria-label="Obfuscation level" aria-valuetext={`Level ${level}: ${level === 1 ? '0% obfuscation; no terms selected' : level === 10 ? '100% obfuscation; priorities 2 through 10 selected' : `priorities 2 through ${level} selected`}`} onChange={(event) => { setExportPreview(null); setLevel(Number(event.target.value)); }} /><p className="priority-help">Priorities run from 2 (most sensitive) to 10 (least sensitive). Level 1 selects none; level 10 selects priorities 2–10.</p></fieldset></div>}
                 {reviewableProjectDocument && <p className="sensitivity-note">Include and Exclude decisions apply only to candidates selected at this level.</p>}
                 {view === 'preview' && <p className="term-interaction-help">Click a highlighted word to include · double-click to exclude · right-click for Reset / Include / Exclude.</p>}
                 {view === 'preview' && activeFile.isProjectDocument && activeFile.previewFormat === 'DOCX' && <div className="preview page-preview-shell">
-                  <div className="preview-note"><span className="status-dot" /><span>Word-compatible page layout · highlighted candidates match the review list · original document remains unchanged.</span></div>
+                  <div className="preview-note"><span className="status-dot" /><span>Word-compatible page layout · highlights reflect candidate decisions · original document remains unchanged.</span></div>
                   {activeFile.pagePreviewPageCount > 0 && <div className="docx-page-navigation" role="group" aria-label="DOCX page navigation">
                     <button className="small-btn" type="button" onClick={() => selectDocxPage((activeFile.pagePreviewPage || 1) - 1)} disabled={(activeFile.pagePreviewPage || 1) <= 1}>← Previous page</button>
                     <span aria-live="polite">Page <strong>{activeFile.pagePreviewPage || 1}</strong> of <strong>{activeFile.pagePreviewPageCount}</strong></span>
@@ -1823,88 +1763,8 @@ export default function App() {
                   <span><strong>{candidateDecisionCounts.excluded}</strong> excluded</span>
                   {notIncludedByLevelCount > 0 && <span><strong>{notIncludedByLevelCount}</strong> not selected at this level</span>}
                 </div>
-                <div className="candidate-bulk-panel" aria-label="Bulk candidate decisions">
-                  <div className="candidate-subhead">Bulk decisions · {reviewCandidates.length} reviewable words</div>
-                  <div className="candidate-bulk-actions">
-                    <button className="small-btn primary" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || !reviewCandidates.length} onClick={() => applyBulkCandidateDecision(reviewCandidates.map((candidate) => candidate.id), 'included')}>Include all words</button>
-                    <button className="small-btn" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || !reviewCandidates.length} onClick={() => applyBulkCandidateDecision(reviewCandidates.map((candidate) => candidate.id), 'excluded')}>Exclude all words</button>
-                  </div>
-                  <p>Automatically excluded words are hidden from this review list. A common-word Yes with No on both identifier and operational signals is excluded; either affirmative signal includes the word.</p>
-                  {[
-                    ['isIdentifier', 'Identifier / named entity'],
-                    ['isOperationallySignificant', 'Operational significance'],
-                  ].map(([signalName, label]) => {
-                    const matchingCount = getCandidatesMatchingSignal(reviewCandidates, signalName, signalThresholds[signalName]).length;
-                    return <div className="candidate-signal-select" key={signalName}>
-                      <label htmlFor={`threshold-${signalName}`}>{label} · Yes at least</label>
-                      <input id={`threshold-${signalName}`} type="range" min="50" max="100" step="5" value={signalThresholds[signalName]} aria-label={`${label} yes-confidence threshold percentage`} aria-valuetext={`${signalThresholds[signalName]} percent yes`} onChange={(event) => setSignalThresholds((current) => ({ ...current, [signalName]: Number(event.target.value) }))} />
-                      <output htmlFor={`threshold-${signalName}`}>{signalThresholds[signalName]}%</output>
-                      <button className="small-btn" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || matchingCount === 0} onClick={() => selectCandidatesBySignal(signalName)}>Add {matchingCount}</button>
-                    </div>;
-                  })}
-                  <div className="candidate-bulk-selected">
-                    <span>{bulkSelectedCandidateIds.length} selected</span>
-                    <button className="small-btn" type="button" disabled={!bulkSelectedCandidateIds.length || candidateBulkBusy} onClick={() => setBulkSelectedCandidateIds([])}>Clear</button>
-                    <button className="small-btn primary" type="button" disabled={!bulkSelectedCandidateIds.length || candidateBulkBusy || activeFile.candidateLoading} onClick={() => applyBulkCandidateDecision(bulkSelectedCandidateIds, 'included')}>Include selected</button>
-                    <button className="small-btn" type="button" disabled={!bulkSelectedCandidateIds.length || candidateBulkBusy || activeFile.candidateLoading} onClick={() => applyBulkCandidateDecision(bulkSelectedCandidateIds, 'excluded')}>Exclude selected</button>
-                  </div>
-                </div>
-                <div className="candidate-subsection">
-                  <div className="candidate-subhead">Manual groups</div>
-                  <p>Select at least two ungrouped candidates to apply decisions to them together.</p>
-                  <button className="small-btn" type="button" disabled={activeFile.candidateLoading || candidateBulkBusy || selectedCandidateIds.length < 2} onClick={() => applyCandidateGroupOperation('add', selectedCandidateIds)}>
-                    Group selected candidates ({selectedCandidateIds.length})
-                  </button>
-                </div>
-                <div className="graph-list">
-                  {activeFile.candidateLoading && <p role="status">{activeFile.candidateProgress ? `Stage 1 complete · ${activeFile.candidateProgress} unique words found; Stage 2 · ${queriedCandidateCount} queried by Ollaya.` : 'Stage 1 · extracting unique words from supported text…'}</p>}
-                  {activeFile.candidateError && <p className="candidate-error" role="alert">{activeFile.candidateError} <button className="small-btn" onClick={() => loadProjectDocumentCandidates(activeFile.id)}>Retry</button></p>}
-                  {activeFile.candidateLimitReached && <p className="candidate-limit">Candidate list reached its display limit.</p>}
-                  {activeFile.ollayaWarning && <p className="candidate-error" role="status">{activeFile.ollayaWarning}</p>}
-                  {includedCandidates.map((candidate) => <div className="graph-card candidate-card" key={candidate.id}>
-                    <label className="candidate-bulk-select"><input type="checkbox" aria-label={`Select ${candidate.term} for a bulk Include or Exclude decision`} checked={bulkSelectedCandidateIds.includes(candidate.id)} disabled={candidateBulkBusy} onChange={(event) => setBulkSelectedCandidateIds((current) => event.target.checked ? [...new Set([...current, candidate.id])] : current.filter((id) => id !== candidate.id))} />Select for Include / Exclude</label>
-                    <label className="candidate-group-select"><input type="checkbox" aria-label={`Select ${candidate.term} for a manual group`} checked={selectedCandidateIds.includes(candidate.id)} disabled={activeFile.candidateLoading || candidateBulkBusy || groupedCandidateIds.has(candidate.id)} onChange={(event) => setSelectedCandidateIds((current) => event.target.checked ? [...current, candidate.id] : current.filter((id) => id !== candidate.id))} />Group with another candidate</label>
-                    <div className="graph-card-head"><span className="graph-term">{candidate.term}</span><span className="confidence">{candidate.scoreStatus === 'queued' ? 'Waiting for Ollaya' : candidate.reviewPriority == null ? 'Review Priority —' : `Review Priority ${candidate.reviewPriority}/10`}</span></div>
-                    <p className="graph-reason">Redaction confidence {candidate.redactionConfidence == null ? candidate.scoreStatus === 'complete' ? 'no affirmative signal' : 'unavailable' : `${Math.round(candidate.redactionConfidence * 100)}%`}{candidate.scoreStatus === 'complete' && candidate.redactionConfidence == null ? ' · not auto-suggested' : ''} · {candidate.nerLabels?.length ? `NER · ${candidate.nerLabels.join(', ')} · model score ${Math.round((candidate.nerScore || 0) * 100)}%${candidate.source === 'manual' ? ' · manual' : ''}` : `${candidate.category.replaceAll('_', ' ').toLowerCase()} · ${candidate.source}`} · {candidate.occurrenceCount} {candidate.occurrenceCount === 1 ? 'occurrence' : 'occurrences'}</p>
-                    {candidate.scoreStatus !== 'queued' && <p className="candidate-location">Ollaya {candidate.scoringModel || 'unavailable'} · identifier: {candidate.signals?.isIdentifier ? `${candidate.signals.isIdentifier.answer} (${Math.round(candidate.signals.isIdentifier.probabilityYes * 100)}% yes)` : 'unavailable'} · operational significance: {candidate.signals?.isOperationallySignificant ? `${candidate.signals.isOperationallySignificant.answer} (${Math.round(candidate.signals.isOperationallySignificant.probabilityYes * 100)}% yes)` : 'unavailable'} · common word: {candidate.signals?.isCommonWord ? `${candidate.signals.isCommonWord.answer} (${Math.round(candidate.signals.isCommonWord.probabilityYes * 100)}% yes)` : 'unavailable'}{candidate.commonWordOverride ? ' · common-word signal overridden by significant signal' : ''}</p>}
-                    {candidate.occurrences[0] && <p className="candidate-location">{candidate.occurrences[0].location}{candidate.occurrencesTruncated ? ' · locations truncated' : ''}</p>}
-                    <div className="graph-actions">
-                      <button className={`small-btn ${candidate.decision === 'included' ? 'primary' : ''}`} disabled={activeFile.candidateLoading || candidateBulkBusy} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'included' ? 'suggested' : 'included')}>{candidate.decision === 'included' ? 'Included' : 'Include'}</button>
-                      <button className={`small-btn ${candidate.decision === 'excluded' ? 'selected' : ''}`} disabled={activeFile.candidateLoading || candidateBulkBusy} onClick={() => setProjectCandidateDecision(candidate, candidate.decision === 'excluded' ? 'suggested' : 'excluded')}>{candidate.decision === 'excluded' ? 'Excluded' : 'Exclude'}</button>
-                    </div>
-                  </div>)}
-                  {!activeFile.candidateLoading && !activeFile.candidateError && includedCandidates.length === 0 && <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>{activeFile.previewError ? 'Word review requires a readable local preview.' : reviewCandidates.length ? 'No words are included yet.' : candidates.length ? 'All extracted words were automatically excluded.' : 'No words found in supported editable text.'}</p>}
-                </div>
                 {candidateGroups.length > 0 && <div className="candidate-subsection"><div className="candidate-subhead">Confirmed groups</div>{candidateGroups.map((group) => <div className="confirmed-group" key={group.id}><label><input type="checkbox" checked={mergeGroupIds.includes(group.id)} onChange={(event) => setMergeGroupIds((current) => event.target.checked ? [...current, group.id] : current.filter((id) => id !== group.id))} /> Merge group</label>{group.candidateIds.map((candidateId) => <div className="confirmed-member" key={candidateId}><span>{candidatesById[candidateId]?.term || 'Candidate'}</span><div>{group.candidateIds.length > 1 && <button className="small-btn" onClick={() => applyCandidateGroupOperation('split', [candidateId], group.id)}>Split out</button>}<button className="small-btn" onClick={() => applyCandidateGroupOperation('remove', [candidateId], group.id)}>Remove</button></div></div>)}</div>)}<button className="small-btn" disabled={mergeGroupIds.length < 2} onClick={() => applyCandidateGroupOperation('merge', [], undefined, mergeGroupIds)}>Merge selected groups</button></div>}
               </section> : <section className="panel"><div className="panel-head"><span className="panel-title">{activeFile.isProjectDocument ? 'Exported version' : 'Suggested groups'}</span><span className="panel-meta">{activeFile.isProjectDocument ? 'Read only' : `${visibleGroups.length} groups`}</span></div><div className="graph-list">{activeFile.isProjectDocument ? <><p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>This obfuscated version is read-only. Select Original above to review or adjust its candidate decisions.</p><button className="small-btn" type="button" onClick={() => downloadProjectVersion(activeVersion.id, activeVersion.name)}>Download this version</button><label className="dense-toggle"><input type="checkbox" checked={denseText} onChange={(event) => setDenseText(event.target.checked)} /> Dense text view</label>{previewSections.length > 1 && <div className="preview-navigation" role="group" aria-label="Preview section navigation" aria-describedby="preview-navigation-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" onKeyDown={handlePreviewNavigationKeyDown}><span className="sr-only" id="preview-navigation-help">Use Left or Right Arrow to move between sections, or Home and End to jump to the first and last sections.</span><button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex - 1)} disabled={sectionIndex <= 0} aria-label="Previous preview section">Previous</button><span aria-live="polite"><strong>Section {sectionIndex + 1} of {previewSections.length}</strong><small>{activeSection?.label}</small></span><button className="small-btn" type="button" onClick={() => selectPreviewSection(sectionIndex + 1)} disabled={sectionIndex >= previewSections.length - 1} aria-label="Next preview section">Next</button></div>}</> : visibleGroups.length ? visibleGroups.map((group) => <div key={group.id} className={`graph-card ${selectedGroup === group.id ? 'selected' : ''}`} onClick={() => setSelectedGroup(group.id)}><div className="graph-card-head"><span className="graph-term">{group.term}</span><span className="confidence">{group.confidence} match</span></div><p className="graph-reason">{group.reason}</p><div className="member-row">{group.members.map((member, index) => <span key={member} className={`member ${confirmed[group.id] || (index === 0 && group.id === 'alex') ? 'confirmed' : ''}`}>{member} · {countMatches(activeText, member)}</span>)}</div><div className="graph-actions"><button className="small-btn primary" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'included'); }}>{decisions[group.id] === 'included' ? 'Included' : 'Include group'}</button><button className="small-btn" onClick={(event) => { event.stopPropagation(); changeDecision(group.id, 'excluded'); }}>Exclude</button></div></div>) : <p style={{ padding: 10, color: 'var(--muted)', fontSize: 12 }}>No detected groups at this level.</p>}</div></section>}
-              {activeFile.isProjectDocument && <section className="panel coverage-panel" aria-labelledby="coverage-title">
-                <div className="panel-head"><span id="coverage-title" className="panel-title">Coverage and limits</span><span className="panel-meta">{activeFile.previewFormat || activeFile.type}</span></div>
-                <div className={`coverage-alert ${unsupportedPartCount || previewWarnings.length ? 'has-warning' : ''}`} role={unsupportedPartCount || previewWarnings.length ? 'alert' : 'status'}>
-                  {previewWarnings.length > 0 ? previewWarnings.join(' ') : unsupportedPartCount > 0 ? `${unsupportedPartCount} unsupported package parts were detected.` : 'This report describes adapter coverage; it does not guarantee that every sensitive value was detected.'}
-                </div>
-                <dl className="coverage-stats">
-                  <div><dt>Adapter / encoding</dt><dd>{activeFile.previewFormat || 'Loading'}{activeFile.previewEncoding ? ` · ${activeFile.previewEncoding}` : ''}</dd></div>
-                  {activeFile.previewLineEndings && <div><dt>Line endings</dt><dd>{activeFile.previewLineEndings}</dd></div>}
-                  {activeFile.previewDialect && <div><dt>CSV delimiter</dt><dd>{JSON.stringify(activeFile.previewDialect.delimiter)}</dd></div>}
-                  {previewCoverage ? <>
-                    <div><dt>XML parts examined</dt><dd>{previewCoverage.examinedXmlPartCount}</dd></div>
-                    <div><dt>Text-bearing parts</dt><dd>{previewCoverage.textPartCount}</dd></div>
-                    <div><dt>Non-XML parts skipped</dt><dd>{previewCoverage.skippedPartCount}</dd></div>
-                    <div><dt>Unsupported parts detected</dt><dd>{previewCoverage.unsupportedPartCount}</dd></div>
-                  </> : <div><dt>Coverage inventory</dt><dd>Package-part inventory not provided for this format</dd></div>}
-                  {activeFile.previewTruncated && <div><dt>Preview</dt><dd>Truncated; saved original remains complete</dd></div>}
-                  {activeFile.previewSectionsTruncated && <div><dt>Sections</dt><dd>Section list or text truncated to preview limits</dd></div>}
-                  {activeFile.existingPlaceholderLikeTextCount > 0 && <div><dt>Placeholder-like strings</dt><dd>{activeFile.existingPlaceholderLikeTextCount} found; review before processing</dd></div>}
-                </dl>
-                {previewCoverage && <details className="coverage-details">
-                  <summary>View bounded package-part inventory</summary>
-                  {previewCoverage.partNamesTruncated && <p className="coverage-truncated">Part names are truncated to a bounded list.</p>}
-                  {[['Examined XML parts', previewCoverage.examinedXmlParts], ['Text-bearing parts', previewCoverage.textParts], ['Skipped parts', previewCoverage.skippedParts], ['Unsupported parts', previewCoverage.unsupportedParts]].map(([label, parts]) => parts?.length > 0 && <div className="coverage-part-list" key={label}><strong>{label}</strong><ul>{parts.map((part) => <li key={`${label}-${part}`}>{part}</li>)}</ul></div>)}
-                </details>}
-                <p className="coverage-scope">Only adapter-supported editable text is reviewed. Images/OCR, metadata, macros, embedded binary content, and unhandled text surfaces are not analyzed. Unsupported-part warnings must be considered before any later export.</p>
-              </section>}
-              <section className="panel status-card"><div className="status-line"><span className="status-dot" /><div><strong>Private local workspace</strong><p>{currentProject ? 'Project metadata and graph state are stored locally; demo documents are not part of this project.' : 'Text preview runs in this browser. No document is uploaded.'}</p></div></div><hr className="rule" /><div className="status-stat"><span>Graph protection</span><span>{currentProject ? 'AES-GCM' : 'Session only'}</span></div><div className="status-stat"><span>Project state</span><span>{currentProject ? 'saved locally' : 'demo only'}</span></div><div className="status-stat"><span>File ceiling</span><span>100 MB</span></div></section>
-              {activeFile.isProjectDocument && <section className="panel status-card"><div className="panel-head" style={{ padding: '0 0 12px', border: 0, minHeight: 'auto' }}><span className="panel-title">Restore returned Office file</span><span className="panel-meta">Exact tokens only</span></div><p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 12, lineHeight: 1.45 }}>{activeVersion.kind === 'obfuscated' ? 'Choose the returned DOCX, PPTX, or XLSX associated with this obfuscated version. Unknown or changed tokens remain untouched.' : 'Select an obfuscated DOCX, PPTX, or XLSX version above to restore a returned file.'}</p><button className="primary-btn" style={{ width: '100%' }} disabled={activeVersion.kind !== 'obfuscated' || restoreBusy} onClick={previewProjectRestoration}>{restoreBusy ? 'Preparing…' : 'Choose file & preview'}</button>{activeFile.restoreReport && <dl className="restore-report"><div><dt>Exact occurrences restored</dt><dd>{activeFile.restoreReport.restoredCount}</dd></div><div><dt>Unresolved occurrences</dt><dd>{activeFile.restoreReport.unresolvedCount}</dd></div></dl>}</section>}
             </aside>
           </section>
         </div>

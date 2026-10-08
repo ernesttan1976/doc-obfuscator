@@ -410,92 +410,6 @@
   border-top: 1px solid var(--border-soft);
 }
 
-.candidate-bulk-panel {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border-top: 1px solid var(--border-soft);
-  background: var(--surface);
-}
-
-.candidate-bulk-panel > p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.4;
-}
-
-.candidate-bulk-actions,
-.candidate-bulk-selected {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.candidate-bulk-actions .small-btn,
-.candidate-bulk-selected .small-btn {
-  flex: 1 1 auto;
-}
-
-.candidate-bulk-selected {
-  padding-top: 8px;
-  border-top: 1px solid var(--border-soft);
-}
-
-.candidate-bulk-selected > span {
-  flex: 1 1 100%;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.candidate-signal-select {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-}
-
-.candidate-signal-select label {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--fg);
-  font-size: 10px;
-}
-
-.candidate-signal-select input {
-  flex: 0 0 64px;
-  width: 64px;
-  accent-color: var(--accent);
-}
-
-.candidate-signal-select output {
-  flex: 0 0 32px;
-  color: var(--muted);
-  font-size: 10px;
-  font-family: var(--font-mono);
-}
-
-.candidate-signal-select .small-btn {
-  flex: 0 0 auto;
-  padding: 0 7px;
-  font-size: 10px;
-}
-
-.candidate-bulk-select {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.candidate-bulk-select input,
-.candidate-group-select input {
-  accent-color: var(--accent);
-}
-
 .confirmed-group {
   padding: 9px 0;
   border-top: 1px solid var(--border-soft);
@@ -509,22 +423,6 @@
 .confirmed-member .small-btn {
   flex: 0 0 auto;
   padding: 0 7px;
-}
-
-.candidate-group-select {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 7px;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.candidate-subsection > p {
-  margin: 5px 0 9px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
 }
 
 .confirmed-group > label {
@@ -566,92 +464,6 @@
 .candidate-counts strong {
   color: var(--fg);
   font-family: var(--font-mono);
-}
-
-.coverage-alert,
-.coverage-scope,
-.coverage-truncated {
-  margin: 11px 12px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.coverage-alert.has-warning {
-  padding: 9px;
-  border-left: 3px solid var(--warn);
-  background: color-mix(in oklch, var(--warn) 10%, var(--bg));
-  color: var(--fg);
-}
-
-.coverage-stats {
-  display: grid;
-  gap: 0;
-  margin: 0 12px;
-}
-
-.coverage-stats > div {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border-soft);
-  font-size: 11px;
-}
-
-.coverage-stats dt {
-  color: var(--muted);
-}
-
-.coverage-stats dd {
-  margin: 0;
-  text-align: right;
-  overflow-wrap: anywhere;
-}
-
-.coverage-details {
-  margin: 11px 12px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.coverage-details summary {
-  width: fit-content;
-  cursor: pointer;
-  color: var(--accent);
-}
-
-.coverage-part-list {
-  margin-top: 10px;
-}
-
-.coverage-part-list strong {
-  color: var(--fg);
-}
-
-.coverage-part-list ul {
-  max-height: 150px;
-  overflow: auto;
-  margin: 5px 0 0;
-  padding-left: 18px;
-}
-
-.coverage-part-list li {
-  margin: 3px 0;
-  overflow-wrap: anywhere;
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
-.coverage-scope {
-  padding-top: 9px;
-  border-top: 1px solid var(--border-soft);
-}
-
-.coverage-report summary:focus-visible,
-.coverage-details summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
 }
 
 .dense-toggle {
