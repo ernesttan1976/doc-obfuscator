@@ -51,7 +51,11 @@ def test_local_ollaya_scorer_logs_raw_outputs_and_requests(tmp_path, monkeypatch
     assert entries[1]["response"]["stdout"] == "NAME\nvon:1.1\n"
     score_request = entries[2]
     assert score_request["request"]["model"] == "von:1.1"
-    assert score_request["request"]["questions"]["is_identifier"]["instructions"].startswith("Review entities")
+    identifier_prompt = score_request["request"]["questions"]["is_identifier"]["instructions"]
+    assert identifier_prompt.startswith("Review entities")
+    assert "ordinary English words" in identifier_prompt
+    assert "'abandon'" in identifier_prompt
+    assert "'adapt'" in score_request["request"]["questions"]["is_common_word"]["instructions"]
     assert score_request["request"]["state"] == {
         "candidate": "Falcon",
         "context": "Falcon launches at dawn.",

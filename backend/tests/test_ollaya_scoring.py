@@ -208,9 +208,16 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
 
     assert captured["command"][:3] == ["/usr/local/bin/ollaya", "run", "von:1.1"]
     questions_arg = captured["command"][captured["command"].index("--questions") + 1]
-    assert set(json.loads(questions_arg)) == {
+    questions = json.loads(questions_arg)
+    assert set(questions) == {
         "is_identifier", "is_operationally_significant", "is_common_word"
     }
+    identifier_prompt = questions["is_identifier"]["instructions"]
+    assert "ordinary English word" in identifier_prompt
+    assert "'abandon'" in identifier_prompt
+    assert "capitalized" in identifier_prompt
+    assert "clearly uses it to name" in identifier_prompt
+    assert "'adapt'" in questions["is_common_word"]["instructions"]
     assert "Private Project" not in " ".join(captured["command"])
     assert json.loads(captured["input"]) == {
         "candidate": "Private Project",

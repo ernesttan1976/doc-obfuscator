@@ -43,13 +43,19 @@ _QUESTIONS = {
     "is_identifier": {
         "type": "choice",
         "instructions": (
-            "Using the candidate and all supplied occurrence contexts, decide whether it refers "
-            "to a specific named entity in this document. Consider the examples together; do not "
-            "infer entity status from capitalization alone."
+            "Using the candidate and all supplied occurrence contexts, decide whether it actually "
+            "refers to a specific named entity in this document. Do not infer entity status just "
+            "because the word was extracted as a candidate, is capitalized, or has an entity label. "
+            "If an ordinary English word is used with its normal dictionary meaning, answer No; "
+            "for example, 'abandon' in 'do not abandon the plan' or 'adapt' in 'adapt the plan' "
+            "is not an identifier. Answer Yes only when the context clearly uses it to name a "
+            "particular person, organization, project, location, system, or codeword. A common word "
+            "can still be Yes when the context explicitly uses it as such a name. Consider all "
+            "supplied occurrences together."
         ),
         "criteria": {
-            "Yes": "It refers to a person, organization, project, location, system, codeword, or other specific named entity.",
-            "No": "It is ordinary prose, a common word with no specific entity use, a malformed token, or a reference-number artifact.",
+            "Yes": "The context clearly uses it to refer to a particular person, organization, project, location, system, codeword, or other specific named entity.",
+            "No": "It is an ordinary English word used with its normal meaning (such as 'abandon' or 'adapt'), ordinary prose, a malformed token, or a reference-number artifact, with no clear use as a specific name.",
         },
     },
     "is_operationally_significant": {
@@ -67,11 +73,12 @@ _QUESTIONS = {
         "type": "choice",
         "instructions": (
             "Independently decide whether the candidate itself is an ordinary, common English "
-            "word. Ignore capitalization and named-entity status for this signal; a common word "
-            "can still be used as a specific name in context."
+            "word. Words such as 'abandon' and 'adapt' are common English words. Ignore "
+            "capitalization and named-entity status for this signal; a common word can still be "
+            "used as a specific name in context."
         ),
         "criteria": {
-            "Yes": "This is a common English word.",
+            "Yes": "This is a common English word, such as 'abandon' or 'adapt', regardless of capitalization or use as a name in context.",
             "No": "This is uncommon, invented, malformed, or not a common English word.",
         },
     },

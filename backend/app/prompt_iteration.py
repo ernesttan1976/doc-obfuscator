@@ -27,10 +27,17 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 INITIAL_PROMPT = (
     "Classify each candidate word using its context. Answer all three questions "
-    "independently. Judge identifier and operational significance in context; "
-    "judge common-word status from the word itself, ignoring capitalization. "
-    "A word may be common and also identify an entity or have operational "
-    "significance. Return a Yes/No choice and its probability for every signal."
+    "independently. For identifier, answer Yes only if the context clearly uses the "
+    "candidate to name a specific entity; a word being extracted, capitalized, or "
+    "tagged as an entity is not enough. Ordinary English words used with their normal "
+    "meaning are not identifiers: 'abandon' in 'do not abandon the plan' and 'adapt' "
+    "in 'adapt the plan' are No. A common word can be an identifier only when the "
+    "context clearly uses it as a particular name, such as a project or codeword. "
+    "Judge operational significance in context; judge common-word status from the "
+    "word itself, ignoring capitalization. 'Abandon' and 'adapt' are common English "
+    "words, so their common-word answer is Yes. A word may be common and also identify "
+    "an entity or have operational significance. Return a Yes/No choice and its "
+    "probability for every signal."
 )
 WORD_PATTERN = re.compile(r"[^\W_]+(?:['’][^\W_]+)*", re.UNICODE)
 SIGNALS = (
@@ -52,11 +59,14 @@ SIGNAL_OUTPUT_NAMES = {
 SIGNAL_QUESTIONS = {
     "is_identifier": (
         (
-            "Does the candidate identify a person, organization, project, location, "
-            "system, codeword, or other named entity in this context?"
+            "Does the context clearly use the candidate to refer to a particular person, "
+            "organization, project, location, system, codeword, or other named entity? "
+            "Do not count ordinary English words used with their normal meaning (for "
+            "example, 'abandon' in 'do not abandon the plan' or 'adapt' in 'adapt the plan'). "
+            "Extraction, capitalization, or an entity tag alone is not evidence of a name."
         ),
-        "It identifies a named entity in this context.",
-        "It does not identify a named entity in this context.",
+        "The context clearly uses it as a particular named entity, not merely as an ordinary word.",
+        "It is ordinary prose or an ordinary English word used with its normal meaning, with no clear specific-name use.",
     ),
     "is_operationally_significant": (
         (
@@ -69,9 +79,10 @@ SIGNAL_QUESTIONS = {
     "is_common_word": (
         (
             "Is this a common English word? Ignore capitalization and judge the "
-            "word itself, independently of its use as an entity in context."
+            "word itself, independently of its use as an entity in context. 'Abandon' "
+            "and 'adapt' are common English words."
         ),
-        "This is a common English word.",
+        "This is a common English word, such as 'abandon' or 'adapt', regardless of capitalization or use as a name.",
         "This is uncommon, invented, malformed, or not a common English word.",
     ),
 }
