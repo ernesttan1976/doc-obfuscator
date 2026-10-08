@@ -37,15 +37,31 @@ const OLLAYA_CSV_COLUMNS = [
   ['is_identifier_percent', 'Identifier'],
   ['is_operationally_significant_percent', 'Operational'],
   ['is_common_word_percent', 'Common word'],
-  ['is_correct', 'Correct'],
+  ['target_is_identifier', 'target_is_identifier'],
+  ['target_is_operationally_significant', 'target_is_operationally_significant'],
+  ['target_is_common_word', 'target_is_common_word'],
 ];
+const OLLAYA_TARGET_COLUMNS = OLLAYA_CSV_COLUMNS.slice(4).map(([column]) => column);
+
+const serializeOllayaCsv = (rows) => {
+  const escapeCell = (value) => {
+    const text = value == null ? '' : String(value);
+    return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  };
+  return [
+    OLLAYA_CSV_COLUMNS.map(([column]) => column).join(','),
+    ...rows.map((row) => OLLAYA_CSV_COLUMNS.map(([column]) => escapeCell(
+      row[column] ?? (column.startsWith('target_') ? 0 : ''),
+    )).join(',')),
+  ].join('\r\n') + '\r\n';
+};
 
 const csvRowFromCandidate = (candidate) => ({
   word: candidate.term,
   is_identifier_percent: candidate.signals?.isIdentifier?.probabilityYes ?? '',
   is_operationally_significant_percent: candidate.signals?.isOperationallySignificant?.probabilityYes ?? '',
   is_common_word_percent: candidate.signals?.isCommonWord?.probabilityYes ?? '',
-  is_correct: 'N',
+  ...Object.fromEntries(OLLAYA_TARGET_COLUMNS.map((column) => [column, 0])),
 });
 
 const readRecentProjects = () => {
@@ -173,7 +189,9 @@ export default function App() {
     is_identifier_percent: 190,
     is_operationally_significant_percent: 245,
     is_common_word_percent: 190,
-    is_correct: 110,
+    target_is_identifier: 150,
+    target_is_operationally_significant: 250,
+    target_is_common_word: 180,
   });
   const csvLoadSequence = useRef(0);
   const csvColumnResize = useRef(null);
@@ -291,8 +309,8 @@ export default function App() {
               is_identifier_percent: row.is_identifier_percent,
               is_operationally_significant_percent: row.is_operationally_significant_percent,
               is_common_word_percent: row.is_common_word_percent,
+              ...Object.fromEntries(OLLAYA_TARGET_COLUMNS.map((column) => [column, row[column] ?? saved[column] ?? 0])),
             } : {}),
-            is_correct: row._dirty ? row.is_correct : saved.is_correct,
             _originalWord: saved.word,
           });
         });
@@ -348,10 +366,22 @@ export default function App() {
     }
   };
 
+  const downloadOllayaCsv = () => {
+    const blob = new Blob([`\uFEFF${serializeOllayaCsv(ollayaRows)}`], { type: 'text/csv;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = ollayaCsvFilename || `${activeFile.name}.ollaya.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  };
+
   const clearOllayaCache = async () => {
     if (!activeFile?.id || !projectDirectory || !localToken || ollayaCacheClearing || activeFile.candidateLoading) return;
     const unsavedWarning = ollayaCsvDirty ? ' Unsaved score edits will be cleared.' : '';
-    if (!window.confirm(`Clear cached Ollaya responses for ${activeFile.name} and rescore this document now? Saved is_correct labels will be kept.${unsavedWarning}`)) return;
+    if (!window.confirm(`Clear cached Ollaya responses for ${activeFile.name} and rescore this document now? Saved target labels will be kept.${unsavedWarning}`)) return;
 
     setOllayaCacheClearing(true);
     setOllayaCsvError('');
@@ -818,7 +848,7 @@ export default function App() {
               return current.map((row, index) => index === rowIndex
                 ? {
                   ...(row._dirty ? row : csvRow),
-                  is_correct: row.is_correct || 'N',
+                  ...Object.fromEntries(OLLAYA_TARGET_COLUMNS.map((column) => [column, row[column] ?? 0])),
                   _originalWord: row._originalWord || row.word,
                   _documentId: documentId,
                   _stream: true,
@@ -1889,14 +1919,14 @@ export default function App() {
               <span>{column}</span><button className="ollaya-column-resizer" type="button" aria-label={`Resize ${column} column`} onPointerDown={(event) => startOllayaColumnResize(column, event)} onPointerMove={moveOllayaColumnResize} onPointerUp={endOllayaColumnResize} onPointerCancel={endOllayaColumnResize} />
             </th>)}</tr></thead>
             <tbody>{ollayaRows.map((row, rowIndex) => <tr key={`${row._documentId}-${row._originalWord || row.word}-${rowIndex}`}>
-              {OLLAYA_CSV_COLUMNS.map(([column]) => <td key={column}>{column === 'is_correct'
-                ? <select aria-label={`${row.word} is_correct`} value={row[column] || 'N'} disabled={ollayaCsvSaving || ollayaCacheClearing} onChange={(event) => editOllayaCsvCell(rowIndex, column, event.target.value)}><option value="N">N</option><option value="Y">Y</option></select>
+              {OLLAYA_CSV_COLUMNS.map(([column]) => <td key={column}>{column.startsWith('target_')
+                ? <select aria-label={`${row.word} ${column}`} value={row[column] ?? 0} disabled={ollayaCsvSaving || ollayaCacheClearing} onChange={(event) => editOllayaCsvCell(rowIndex, column, event.target.value)}><option value="0">0</option><option value="1">1</option></select>
                 : <input aria-label={`${row.word} ${column}`} type={column.endsWith('_percent') ? 'number' : 'text'} min={column.endsWith('_percent') ? 0 : undefined} max={column.endsWith('_percent') ? 1 : undefined} step={column.endsWith('_percent') ? 0.01 : undefined} maxLength={column === 'word' ? 256 : undefined} value={row[column] ?? ''} disabled={ollayaCsvSaving || ollayaCacheClearing} onChange={(event) => editOllayaCsvCell(rowIndex, column, event.target.value)} />}</td>)}
             </tr>)}
             {!ollayaRows.length && <tr><td className="ollaya-csv-empty" colSpan={OLLAYA_CSV_COLUMNS.length}>{ollayaCsvError || (ollayaCsvStatus === 'Loading CSV…' ? ollayaCsvStatus : 'Results will appear as Ollaya scores this file.')}</td></tr>}
           </tbody></table></div>
-          <p className="ollaya-csv-note">Probabilities use 0–1 values. Each source file has its own CSV. is_correct defaults to N.</p>
-          <footer className="ollaya-csv-dialog-actions"><button className="text-btn" type="button" onClick={closeOllayaCsv}>Close</button><button className="text-btn" type="button" onClick={clearOllayaCache} disabled={ollayaCsvSaving || ollayaCacheClearing || activeFile.candidateLoading}>{ollayaCacheClearing ? 'Clearing & rescoring…' : 'Clear response cache'}</button><button className="primary-btn" type="button" onClick={saveOllayaCsv} disabled={ollayaCsvSaving || ollayaCacheClearing || !ollayaCsvDirty}>{ollayaCsvSaving ? 'Saving…' : 'Save'}</button></footer>
+          <p className="ollaya-csv-note">Probabilities use 0–1 values. Target labels use 0 or 1 and default to 0. Each source file has its own CSV.</p>
+          <footer className="ollaya-csv-dialog-actions"><button className="text-btn" type="button" onClick={closeOllayaCsv}>Close</button><button className="text-btn" type="button" onClick={downloadOllayaCsv}>Download CSV</button><button className="text-btn" type="button" onClick={clearOllayaCache} disabled={ollayaCsvSaving || ollayaCacheClearing || activeFile.candidateLoading}>{ollayaCacheClearing ? 'Clearing & rescoring…' : 'Clear response cache'}</button><button className="primary-btn" type="button" onClick={saveOllayaCsv} disabled={ollayaCsvSaving || ollayaCacheClearing || !ollayaCsvDirty}>{ollayaCsvSaving ? 'Saving…' : 'Save'}</button></footer>
         </section>
       </div>}
       {exportPreview && <div className="modal-backdrop open" onMouseDown={(event) => { if (event.target === event.currentTarget && !exportBusy) setExportPreview(null); }}><section className="modal export-preview-modal" role="dialog" aria-modal="true" aria-labelledby="export-preview-title" aria-describedby="export-preview-description"><h2 id="export-preview-title">Review obfuscated copy</h2><p id="export-preview-description">{exportPreview.outputName} · {exportPreview.matchCount} supported-text occurrences will change. This preview does not modify the original.</p><div className="export-preview-content"><h3>Selected replacements</h3><ul className="export-match-list">{exportPreview.matches.map((match) => <li key={match.candidateId}><span><strong>{match.term}</strong> · {match.occurrenceCount} {match.occurrenceCount === 1 ? 'match' : 'matches'}</span><code>{match.token}</code></li>)}</ul><h3>Output preview · {exportPreview.format}</h3><pre>{exportPreviewText || 'No supported text is present in this preview.'}</pre><h3>Coverage and warnings</h3>{exportPreview.warnings.length ? <ul className="export-warning-list">{exportPreview.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul> : <p>No adapter warnings were reported. This is not a guarantee that all sensitive information was found.</p>}<p>Only adapter-supported editable text is processed. Images/OCR, metadata, macros, embedded binary content, and unhandled text surfaces are not sanitized. The private replacement map remains encrypted in this project and is not included in the output file.</p></div>{exportPreview.requiresAcknowledgement && <label className="export-warning-ack"><input type="checkbox" checked={exportAcknowledged} onChange={(event) => setExportAcknowledged(event.target.checked)} /><span>I reviewed the coverage and placeholder warnings and understand unsupported or unrecognized content may remain.</span></label>}<div className="modal-actions"><button className="text-btn" type="button" onClick={() => setExportPreview(null)} disabled={exportBusy}>Cancel</button><button className="primary-btn" type="button" onClick={approveProjectExport} disabled={exportBusy || (exportPreview.requiresAcknowledgement && !exportAcknowledged)}>{exportBusy ? 'Saving version…' : 'Approve and save new version'}</button></div></section></div>}

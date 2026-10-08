@@ -71,8 +71,18 @@ OLLAYA_RESULTS_COLUMNS = (
     "is_identifier_percent",
     "is_operationally_significant_percent",
     "is_common_word_percent",
+    "target_is_identifier",
+    "target_is_operationally_significant",
+    "target_is_common_word",
+)
+LEGACY_OLLAYA_RESULTS_COLUMNS = (
+    "word",
+    "is_identifier_percent",
+    "is_operationally_significant_percent",
+    "is_common_word_percent",
     "is_correct",
 )
+OLLAYA_TARGET_COLUMNS = OLLAYA_RESULTS_COLUMNS[4:]
 
 
 def _normalize_ollaya_result_row(row: dict[str, object]) -> dict[str, object]:
@@ -96,10 +106,19 @@ def _normalize_ollaya_result_row(row: dict[str, object]) -> dict[str, object]:
             raise ProjectError(f"{column} must be a probability from 0 to 1.")
         normalized[column] = probability
 
-    correctness = str(row.get("is_correct", "N") or "N").strip().upper()
-    if correctness not in {"Y", "N"}:
-        raise ProjectError("is_correct must be Y or N.")
-    normalized["is_correct"] = correctness
+    for column in OLLAYA_TARGET_COLUMNS:
+        value = row.get(column, 0)
+        if value in (None, ""):
+            value = 0
+        if isinstance(value, bool):
+            raise ProjectError(f"{column} must be 0 or 1.")
+        try:
+            numeric_target = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ProjectError(f"{column} must be 0 or 1.") from exc
+        if not math.isfinite(numeric_target) or numeric_target not in {0, 1}:
+            raise ProjectError(f"{column} must be 0 or 1.")
+        normalized[column] = int(numeric_target)
     return normalized
 
 
@@ -118,7 +137,7 @@ def _ollaya_csv_row(candidate: dict[str, object]) -> dict[str, object]:
             for column, signal_name in columns.items()
             if isinstance((signal := signals.get(signal_name)), dict)
         },
-        "is_correct": "N",
+        **{column: 0 for column in OLLAYA_TARGET_COLUMNS},
     }
 
 
@@ -288,7 +307,8 @@ class ProjectService:
             key = str(clean_row["word"]).casefold()
             existing = rows.get(key)
             if existing is not None:
-                clean_row["is_correct"] = existing["is_correct"]
+                for column in OLLAYA_TARGET_COLUMNS:
+                    clean_row[column] = existing[column]
             rows[key] = clean_row
             self._write_ollaya_results(path, rows)
 
@@ -307,13 +327,20 @@ class ProjectService:
         try:
             with path.open("r", encoding="utf-8-sig", newline="") as file:
                 reader = csv.DictReader(file)
-                if tuple(reader.fieldnames or ()) != OLLAYA_RESULTS_COLUMNS:
+                fieldnames = tuple(reader.fieldnames or ())
+                if fieldnames not in {OLLAYA_RESULTS_COLUMNS, LEGACY_OLLAYA_RESULTS_COLUMNS}:
                     raise ProjectError("The Ollaya results CSV has an unexpected header.")
                 rows = [_normalize_ollaya_result_row(row) for row in reader]
         except (OSError, csv.Error, UnicodeError, ValueError) as exc:
             raise ProjectError("The Ollaya results CSV could not be read.") from exc
         unique_rows = {str(row["word"]).casefold(): row for row in rows}
-        return sorted(unique_rows.values(), key=lambda row: str(row["word"]).casefold())
+        sorted_rows = sorted(unique_rows.values(), key=lambda row: str(row["word"]).casefold())
+        if fieldnames == LEGACY_OLLAYA_RESULTS_COLUMNS:
+            ProjectService._write_ollaya_results(
+                path,
+                {str(row["word"]).casefold(): row for row in sorted_rows},
+            )
+        return sorted_rows
 
     @staticmethod
     def _write_ollaya_results(path: Path, rows: dict[str, dict[str, object]]) -> None:

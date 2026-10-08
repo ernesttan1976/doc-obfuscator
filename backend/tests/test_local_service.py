@@ -141,7 +141,9 @@ async def test_ollaya_results_csv_can_be_loaded_and_edited(tmp_path):
         "is_identifier_percent": 0.6,
         "is_operationally_significant_percent": 0.7,
         "is_common_word_percent": 0.2,
-        "is_correct": "N",
+        "target_is_identifier": 0,
+        "target_is_operationally_significant": 0,
+        "target_is_common_word": 0,
     }
     async with client_context as client:
         headers = {"X-Local-App-Token": app.state.local_token}
@@ -168,12 +170,12 @@ async def test_ollaya_results_csv_can_be_loaded_and_edited(tmp_path):
         )
         edited = await client.put(
             "/api/projects/ollaya-results/row",
-            json={**request, "previous_word": "Cedar", "row": {**row, "is_correct": "Y"}},
+            json={**request, "previous_word": "Cedar", "row": {**row, "target_is_identifier": 1}},
             headers=headers,
         )
         bulk_saved = await client.put(
             "/api/projects/ollaya-results",
-            json={**request, "rows": [{**row, "is_correct": "Y"}], "original_words": ["Cedar"]},
+            json={**request, "rows": [{**row, "target_is_identifier": 1}], "original_words": ["Cedar"]},
             headers=headers,
         )
         loaded = await client.get("/api/projects/ollaya-results", params=request, headers=headers)
@@ -192,27 +194,54 @@ async def test_ollaya_results_csv_can_be_loaded_and_edited(tmp_path):
     }
     assert other_empty.json()["filename"] != empty.json()["filename"]
     assert other_empty.json()["rows"] == []
-    assert saved.json()["row"]["is_correct"] == "N"
-    assert edited.json()["row"]["is_correct"] == "Y"
+    assert saved.json()["row"] == row
+    assert edited.json()["row"]["target_is_identifier"] == 1
     assert bulk_saved.status_code == 200
-    assert loaded.json()["rows"] == [{**row, "is_correct": "Y"}]
+    assert loaded.json()["rows"] == [{**row, "target_is_identifier": 1}]
     assert cleared.json()["clearedCount"] == 1
     assert after_clear.json()["rows"] == [{
         "word": "Cedar",
         "is_identifier_percent": "",
         "is_operationally_significant_percent": "",
         "is_common_word_percent": "",
-        "is_correct": "Y",
+        "target_is_identifier": 1,
+        "target_is_operationally_significant": 0,
+        "target_is_common_word": 0,
     }]
     assert other_after_clear.json()["rows"] == []
     csv_file = root / empty.json()["filename"]
     assert csv_file.read_text(encoding="utf-8").splitlines() == [
-        "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,is_correct",
-        "Cedar,,,,Y",
+        "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,target_is_identifier,target_is_operationally_significant,target_is_common_word",
+        "Cedar,,,,1,0,0",
     ]
     assert (root / other_empty.json()["filename"]).read_text(encoding="utf-8").splitlines() == [
-        "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,is_correct",
+        "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,target_is_identifier,target_is_operationally_significant,target_is_common_word",
     ]
+
+
+def test_legacy_ollaya_csv_is_migrated_to_target_columns(tmp_path):
+    path = tmp_path / "legacy.ollaya.csv"
+    path.write_text(
+        "word,is_identifier_percent,is_operationally_significant_percent,is_common_word_percent,is_correct\n"
+        "Cedar,0.6,0.7,0.2,Y\n",
+        encoding="utf-8",
+    )
+
+    rows = ProjectService._read_ollaya_results(path)
+
+    assert rows == [{
+        "word": "Cedar",
+        "is_identifier_percent": 0.6,
+        "is_operationally_significant_percent": 0.7,
+        "is_common_word_percent": 0.2,
+        "target_is_identifier": 0,
+        "target_is_operationally_significant": 0,
+        "target_is_common_word": 0,
+    }]
+    with path.open(encoding="utf-8", newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
+        assert reader.fieldnames == list(projects_module.OLLAYA_RESULTS_COLUMNS)
+        assert next(reader)["target_is_identifier"] == "0"
 
 
 @pytest.mark.anyio
@@ -595,7 +624,11 @@ async def test_candidate_api_persists_encrypted_version_scoped_graph_and_pinned_
         csv_rows = csv_response.json()["rows"]
         csv_words = {row["word"] for row in csv_rows}
         assert {candidate["term"] for candidate in streamed_candidates if candidate["scoreStatus"] != "queued"} <= csv_words
-        assert all(row["is_correct"] == "N" for row in csv_rows)
+        assert all(
+            row[column] == 0
+            for row in csv_rows
+            for column in ("target_is_identifier", "target_is_operationally_significant", "target_is_common_word")
+        )
         assert events[-1]["type"] == "complete"
         assert {candidate["term"] for candidate in streamed_candidates} <= {
             candidate["term"] for candidate in events[-1]["data"]["candidates"]
@@ -1129,7 +1162,9 @@ def test_ollaya_results_are_written_before_each_scored_candidate_is_published(tm
             "is_identifier_percent": 0.6,
             "is_operationally_significant_percent": 0.7,
             "is_common_word_percent": 0.2,
-            "is_correct": "Y",
+            "target_is_identifier": 1,
+            "target_is_operationally_significant": 0,
+            "target_is_common_word": 1,
         },
     )
     service.analyze_document_candidates(root, imported.document_id)
@@ -1142,9 +1177,16 @@ def test_ollaya_results_are_written_before_each_scored_candidate_is_published(tm
         "is_identifier_percent": 0.6,
         "is_operationally_significant_percent": 0.7,
         "is_common_word_percent": 0.2,
-        "is_correct": "Y",
+        "target_is_identifier": 1,
+        "target_is_operationally_significant": 0,
+        "target_is_common_word": 1,
     }
-    assert all(row["is_correct"] == "N" for word, row in rows.items() if word != first_word)
+    assert all(
+        row[column] == 0
+        for word, row in rows.items()
+        if word != first_word
+        for column in ("target_is_identifier", "target_is_operationally_significant", "target_is_common_word")
+    )
 
 
 @pytest.mark.anyio
