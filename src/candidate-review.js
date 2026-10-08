@@ -17,6 +17,10 @@ export function getReviewCandidates(candidates) {
   ));
 }
 
+export function getIncludedCandidates(candidates) {
+  return getReviewCandidates(candidates).filter((candidate) => candidate.decision === 'included');
+}
+
 export function upsertCandidate(candidates, candidate) {
   const index = candidates.findIndex((item) => item.id === candidate.id);
   if (index < 0) return [...candidates, candidate];

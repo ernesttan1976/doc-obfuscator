@@ -5,6 +5,7 @@ import {
   getCandidateDecisionCounts,
   getCandidatesMatchingSignal,
   getCandidatesNotSelectedAtLevel,
+  getIncludedCandidates,
   getReviewCandidates,
   getVisibleCandidates,
   isCandidateAutoSuggested,
@@ -47,6 +48,17 @@ test('automatically excluded candidates are omitted from review while pinned exc
     { id: 'queued', decision: 'suggested', scoreStatus: 'queued' },
   ]);
   assert.deepEqual(review.map(({ id }) => id), ['manual-excluded', 'suggested']);
+});
+
+test('the frontend included-candidate list omits suggestions, exclusions, and queued candidates', () => {
+  const included = getIncludedCandidates([
+    { id: 'included', decision: 'included' },
+    { id: 'suggested', decision: 'suggested' },
+    { id: 'excluded', decision: 'excluded', pinned: true },
+    { id: 'queued-included', decision: 'included', scoreStatus: 'queued' },
+  ]);
+
+  assert.deepEqual(included.map(({ id }) => id), ['included']);
 });
 
 test('queued Stage 1 words stay out of review and preview until scoring completes', () => {
