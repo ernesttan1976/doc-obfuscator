@@ -22,10 +22,11 @@ from .candidate_engine import CandidateBlock
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-SCORING_METHOD = "ollaya_yes_no_v5"
+SCORING_METHOD = "ollaya_yes_no_v6"
 SCORING_MODEL = os.environ.get("OLLAYA_MODEL", "von:1.1").strip() or "von:1.1"
-MAX_CONTEXT_CHARS = 192
-MAX_CONTEXT_WINDOW_CHARS = 192
+MAX_CONTEXT_CHARS = 800
+MAX_CONTEXT_WINDOW_CHARS = 240
+MAX_CONTEXT_SAMPLES = 3
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_SCORE_CACHE_ENTRIES = 2048
 
@@ -41,23 +42,34 @@ def get_ollaya_parallel_runs() -> int:
 _QUESTIONS = {
     "is_identifier": {
         "type": "choice",
-        "instructions": "Does the candidate identify a named entity in context?",
+        "instructions": (
+            "Using the candidate and all supplied occurrence contexts, decide whether it refers "
+            "to a specific named entity in this document. Consider the examples together; do not "
+            "infer entity status from capitalization alone."
+        ),
         "criteria": {
-            "Yes": "It identifies a person, organization, project, location, system, codeword, or other named entity.",
-            "No": "It does not identify a named entity.",
+            "Yes": "It refers to a person, organization, project, location, system, codeword, or other specific named entity.",
+            "No": "It is ordinary prose, a common word with no specific entity use, a malformed token, or a reference-number artifact.",
         },
     },
     "is_operationally_significant": {
         "type": "choice",
-        "instructions": "Does the candidate identify an operational concept in context?",
+        "instructions": (
+            "Using all supplied occurrence contexts, decide whether the candidate identifies "
+            "an operational concept in its actual use, rather than merely appearing in the document."
+        ),
         "criteria": {
-            "Yes": "It identifies an activity, capability, vulnerability, plan, or resource.",
-            "No": "It does not identify an operational concept.",
+            "Yes": "It identifies an activity, capability, vulnerability, plan, resource, or other operationally meaningful concept.",
+            "No": "It does not identify an operationally meaningful concept in the supplied uses.",
         },
     },
     "is_common_word": {
         "type": "choice",
-        "instructions": "Is this candidate a common English word? Ignore capitalization alone. Judge the word itself, not whether it is a valid entity.",
+        "instructions": (
+            "Independently decide whether the candidate itself is an ordinary, common English "
+            "word. Ignore capitalization and named-entity status for this signal; a common word "
+            "can still be used as a specific name in context."
+        ),
         "criteria": {
             "Yes": "This is a common English word.",
             "No": "This is uncommon, invented, malformed, or not a common English word.",
@@ -92,13 +104,31 @@ def build_ollaya_scoring_input(
     *,
     max_context_chars: int = MAX_CONTEXT_CHARS,
 ) -> dict[str, Any]:
-    """Build a compact, transient payload with one bounded occurrence context."""
+    """Build a compact, transient payload with representative bounded use contexts."""
     term = str(candidate.get("term", ""))
     block_by_location = {block.location: block.text for block in text_blocks}
-    remaining = max(0, min(max_context_chars, MAX_CONTEXT_CHARS))
-    for occurrence in candidate.get("occurrences", []):
-        if remaining <= 0:
-            break
+    raw_occurrences = candidate.get("occurrences", [])
+    occurrences = raw_occurrences if isinstance(raw_occurrences, list) else []
+    occurrence_count = candidate.get("occurrenceCount")
+    if not isinstance(occurrence_count, int) or isinstance(occurrence_count, bool) or occurrence_count < 0:
+        occurrence_count = len(occurrences)
+
+    features: dict[str, Any] = {
+        "candidate": term,
+        "occurrenceCount": occurrence_count,
+    }
+    for key in ("category", "source"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value:
+            features[key] = value
+    ner_labels = candidate.get("nerLabels")
+    if isinstance(ner_labels, list):
+        labels = [label for label in ner_labels if isinstance(label, str)]
+        if labels:
+            features["nerLabels"] = labels
+
+    snippets: list[str] = []
+    for occurrence in occurrences:
         if not isinstance(occurrence, dict):
             continue
         location = occurrence.get("location")
@@ -118,10 +148,24 @@ def build_ollaya_scoring_input(
 
         left, right = _sentence_window(text, start, end, MAX_CONTEXT_WINDOW_CHARS)
         snippet = text[left:right].strip()
-        if not snippet:
-            continue
-        return {"candidate": term, "context": snippet[:remaining]}
-    return {"candidate": term}
+        if snippet and snippet not in snippets:
+            snippets.append(snippet)
+
+    if snippets:
+        sample_indices = _spread_sample_indices(len(snippets), MAX_CONTEXT_SAMPLES)
+        context = "\n---\n".join(
+            f"Occurrence {index + 1}: {snippets[index]}" for index in sample_indices
+        )
+        context_limit = max(0, min(max_context_chars, MAX_CONTEXT_CHARS))
+        if context_limit:
+            features["context"] = context[:context_limit]
+    return features
+
+
+def _spread_sample_indices(item_count: int, sample_limit: int) -> list[int]:
+    if item_count <= sample_limit:
+        return list(range(item_count))
+    return [round(index * (item_count - 1) / (sample_limit - 1)) for index in range(sample_limit)]
 
 
 def _sentence_window(text: str, start: int, end: int, max_chars: int) -> tuple[int, int]:

@@ -86,7 +86,7 @@ def test_stage_one_extracts_unique_words_document_wide_and_splits_punctuation_hy
 
 
 def test_stage_one_extracts_more_than_one_thousand_unique_words():
-    text = " ".join(f"word{index}" for index in range(1_001))
+    text = " ".join(f"word{index}suffix" for index in range(1_001))
 
     candidates = extract_word_candidates(
         [CandidateBlock("text", text)],
@@ -105,6 +105,40 @@ def test_stage_one_does_not_extract_numbers_at_or_below_9999():
     )
 
     assert {candidate["term"] for candidate in candidates} == {"10000", "alpha"}
+
+
+def test_stage_one_filters_common_words_and_separates_small_numeric_suffixes():
+    text = "A an THE and falcon34 Falcon34 FALCON34 AB34 myCode34"
+    candidates = extract_word_candidates(
+        [CandidateBlock("text", text)],
+        "doc-1",
+        "version-1",
+    )
+    by_term = {candidate["term"].casefold(): candidate for candidate in candidates}
+
+    assert set(by_term) == {"falcon", "falcon34", "ab34", "mycode34"}
+    assert by_term["falcon"]["occurrenceCount"] == 2
+    assert [
+        text[occurrence["start"]:occurrence["end"]]
+        for occurrence in by_term["falcon"]["occurrences"]
+    ] == ["falcon", "Falcon"]
+    assert text[
+        by_term["falcon34"]["occurrences"][0]["start"]:
+        by_term["falcon34"]["occurrences"][0]["end"]
+    ] == "FALCON34"
+
+
+def test_stage_one_common_word_filter_does_not_override_manual_selection():
+    candidates = extract_word_candidates(
+        [CandidateBlock("text", "A project codename")],
+        "doc-1",
+        "version-1",
+        manual_terms=["A"],
+    )
+
+    manual = next(candidate for candidate in candidates if candidate["term"] == "A")
+    assert manual["source"] == "manual"
+    assert manual["pinned"] is True
 
 
 def test_stage_one_manual_selection_cannot_add_numbers_at_or_below_9999():

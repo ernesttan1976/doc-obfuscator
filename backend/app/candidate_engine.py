@@ -57,10 +57,36 @@ _IDENTIFIER = re.compile(r"\b(?:[A-Z]{2,}[\w]*[-_/][A-Z0-9][A-Z0-9_-]*|[A-Z]{2,}
 _CAPITALIZED_TOKEN = re.compile(r"(?<![\w])(?:[A-Z][a-z]+(?:[’'-][A-Z]?[a-z]+)*|[A-Z]\.)(?![\w])")
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _COMMON_SENTENCE_STARTERS = {"a", "an", "at", "contact", "for", "from", "in", "on", "owner", "please", "reference", "the", "to"}
+_COMMON_WORD_CANDIDATES = frozenset(
+    [
+        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from",
+        "had", "has", "have", "he", "her", "hers", "him", "his", "i", "if", "in", "into",
+        "is", "it", "its", "me", "my", "nor", "of", "on", "or", "our", "ours", "she", "so",
+        "than", "that", "the", "their", "theirs", "them", "then", "there", "these", "they",
+        "this", "those", "through", "to", "too", "us", "was", "we", "were", "what", "when",
+        "where", "which", "while", "who", "whom", "why", "will", "with", "you", "your", "yours",
+    ]
+)
+_SMALL_NUMERIC_SUFFIX = re.compile(r"(?P<base>[^\W\d_]+)(?P<suffix>\d+)$", re.UNICODE)
 
 
 def _is_small_number(term: str) -> bool:
     return term.isdecimal() and int(term) <= 9_999
+
+
+def _strip_small_numeric_suffix(term: str) -> str:
+    """Separate a small trailing reference number from ordinary word candidates.
+
+    Preserve all-uppercase and internally mixed-case tokens, which are more likely
+    to be intentional alphanumeric identifiers than a word followed by a reference.
+    """
+    match = _SMALL_NUMERIC_SUFFIX.fullmatch(term)
+    if match is None or not _is_small_number(match.group("suffix")):
+        return term
+    base = match.group("base")
+    is_lowercase_word = base.islower()
+    is_titlecase_word = len(base) > 1 and base[0].isupper() and base[1:].islower()
+    return base if is_lowercase_word or is_titlecase_word else term
 
 
 @dataclass(frozen=True)
@@ -297,16 +323,18 @@ def extract_word_candidates(
 
     for block in blocks:
         for match in _WORD.finditer(block.text):
-            term = match.group(0)
-            if len(term) > 256 or _is_small_number(term):
+            raw_term = match.group(0)
+            term = _strip_small_numeric_suffix(raw_term)
+            if len(term) > 256 or _is_small_number(term) or term.casefold() in _COMMON_WORD_CANDIDATES:
                 continue
+            suffix = raw_term[len(term):]
             _add_occurrence(
                 collected,
                 term,
                 "WORD",
                 block.location,
                 match.start(),
-                match.end(),
+                match.end() - len(suffix),
             )
 
     for term in manual_terms:

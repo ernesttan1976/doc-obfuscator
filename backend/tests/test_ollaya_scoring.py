@@ -23,7 +23,7 @@ from backend.app.ollaya_scoring import (
 from backend.app.projects import ProjectService
 
 
-def test_input_builder_sends_only_one_short_occurrence_context():
+def test_input_builder_sends_bounded_context_and_candidate_metadata():
     text = "Opening sentence. Project Falcon starts on Monday. Unrelated private appendix text."
     candidate = {
         "id": "project",
@@ -36,10 +36,48 @@ def test_input_builder_sends_only_one_short_occurrence_context():
     }
     features = build_ollaya_scoring_input(candidate, [CandidateBlock("text", text)])
 
-    assert set(features) == {"candidate", "context"}
+    assert set(features) == {"candidate", "category", "source", "occurrenceCount", "context"}
     assert features["candidate"] == "Project Falcon"
-    assert len(features["context"]) <= 192
+    assert features["category"] == "CAPITALIZED_PHRASE"
+    assert features["source"] == "pattern"
+    assert features["occurrenceCount"] == 1
+    assert len(features["context"]) <= 800
     assert "Unrelated private appendix" not in features["context"]
+
+
+def test_input_builder_samples_representative_contexts_across_occurrences():
+    sentences = [
+        "Project Falcon began in the west.",
+        "Ordinary Falcon sightings are frequent.",
+        "Project Falcon moved to the reserve.",
+        "Falcon is a common bird in this area.",
+        "Project Falcon was the codename for the plan.",
+    ]
+    text = " ".join(sentences)
+    starts = [index for index in range(len(text)) if text.startswith("Falcon", index)]
+    candidate = {
+        "term": "Falcon",
+        "category": "WORD",
+        "source": "word",
+        "occurrenceCount": len(starts),
+        "occurrences": [
+            {"location": "text", "start": start, "end": start + len("Falcon")}
+            for start in starts
+        ],
+        "nerLabels": ["entity"],
+    }
+
+    features = build_ollaya_scoring_input(candidate, [CandidateBlock("text", text)])
+
+    assert features["occurrenceCount"] == 5
+    assert features["nerLabels"] == ["entity"]
+    assert features["context"].count("Occurrence ") == 3
+    assert "began in the west" in features["context"]
+    assert "moved to the reserve" in features["context"]
+    assert "codename for the plan" in features["context"]
+    assert "sightings are frequent" not in features["context"]
+    assert "common bird in this area" not in features["context"]
+    assert len(features["context"]) <= 800
 
 
 def test_confidence_priority_boundaries_follow_scoring_plan():
