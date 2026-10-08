@@ -18,6 +18,7 @@ from backend.app.ollaya_scoring import (
     LocalOllayaScorer,
     OllayaScoringError,
     _load_latest_ollaya_request,
+    _load_ollaya_host,
     _load_scoring_model,
     apply_common_word_filter,
     build_ollaya_scoring_input,
@@ -72,6 +73,15 @@ def test_scoring_model_requires_an_explicit_dotenv_value(tmp_path):
 
     with pytest.raises(RuntimeError, match="Set a non-empty OLLAYA_MODEL"):
         _load_scoring_model(dotenv_path)
+
+
+def test_ollaya_host_uses_dotenv_endpoint_and_defaults_to_localhost(tmp_path):
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text("OLLAYA_ENDPOINT=http://192.168.1.20:12345\n", encoding="utf-8")
+    assert _load_ollaya_host(dotenv_path) == "192.168.1.20:12345"
+
+    dotenv_path.write_text("# OLLAYA_ENDPOINT=http://example.test:9000\n", encoding="utf-8")
+    assert _load_ollaya_host(dotenv_path) == "localhost:11435"
 
 
 def test_input_builder_sends_bounded_context_and_candidate_metadata():
@@ -224,8 +234,9 @@ def test_configured_model_is_validated_and_reported():
         validate_ollaya_response({"model": "custom:2", "answers": {}}, expected_model="von:1.1")
 
 
-def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
+def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog, monkeypatch):
     captured = {}
+    monkeypatch.setattr("backend.app.ollaya_scoring.OLLAYA_HOST", "ollaya.example:12345")
 
     def fake_run(command, **kwargs):
         if command[-1] == "list":
@@ -260,6 +271,7 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog):
         )
 
     assert captured["command"][:3] == ["/usr/local/bin/ollaya", "run", "von:1.1"]
+    assert captured["env"]["OLLAYA_HOST"] == "ollaya.example:12345"
     questions_arg = captured["command"][captured["command"].index("--questions") + 1]
     questions = json.loads(questions_arg)
     assert set(questions) == {

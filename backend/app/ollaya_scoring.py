@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterable, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values, load_dotenv
 
@@ -23,6 +24,38 @@ from .candidate_engine import CandidateBlock
 
 DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(DOTENV_PATH)
+DEFAULT_OLLAYA_ENDPOINT = "http://localhost:11435"
+
+
+def _load_ollaya_host(dotenv_path: Path) -> str:
+    """Resolve the configured HTTP endpoint to the host format used by Ollaya CLI."""
+    endpoint = dotenv_values(dotenv_path).get("OLLAYA_ENDPOINT")
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        endpoint = DEFAULT_OLLAYA_ENDPOINT
+
+    parsed = urlsplit(endpoint.strip())
+    if (
+        parsed.scheme != "http"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("OLLAYA_ENDPOINT must be an HTTP endpoint URL.")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("OLLAYA_ENDPOINT must contain a valid port.") from exc
+    if port is None:
+        port = 80
+
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    return f"{host}:{port}"
+
+
+OLLAYA_HOST = _load_ollaya_host(DOTENV_PATH)
 
 
 def _load_scoring_model(dotenv_path: Path) -> str:
@@ -525,6 +558,7 @@ class LocalOllayaScorer:
                 text=True,
                 timeout=timeout,
                 check=False,
+                env={**os.environ, "OLLAYA_HOST": OLLAYA_HOST},
             )
 
         with self._process_lock:
@@ -536,6 +570,7 @@ class LocalOllayaScorer:
                 stderr=subprocess.PIPE,
                 text=True,
                 start_new_session=(os.name == "posix"),
+                env={**os.environ, "OLLAYA_HOST": OLLAYA_HOST},
             )
             self._active_processes.add(process)
         try:
