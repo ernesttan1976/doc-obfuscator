@@ -1,0 +1,184 @@
+{
+  "version": "ollaya_request_v003",
+  "format_version": 1,
+  "created_at": "2026-10-10",
+  "status": "tuned_candidate",
+  "purpose": "Candidate-only Ollaya scoring tuned from v002's thresholded training-set errors.",
+  "model": "Read from the repository .env key OLLAYA_MODEL",
+  "transport": {
+    "command": [
+      "ollaya",
+      "run",
+      "<model>",
+      "--questions",
+      "<questions-json>",
+      "--format",
+      "json",
+      "--state-json"
+    ],
+    "format": "json",
+    "state_template": {
+      "candidate": "<candidate term>",
+      "occurrenceCount": "<integer, when supplied>",
+      "context": "<bounded occurrence contexts, when available>"
+    }
+  },
+  "questions": {
+    "is_identifier": {
+      "type": "choice",
+      "instructions": "Judge only the candidate string; this tuning input contains no occurrence context. Do not invent a sentence or claim that document-specific use has been verified. Decide whether the string is an identifier-like reference to a particular person, organization, project, location, system, codeword, or named institutional/operational entity. Distinctive names and organization or operation acronyms can qualify even when abbreviated or pluralized. For this dataset's labeling convention, a formal military rank or office can count as a person/office reference when it is used as a label (for example Colonel, Commander, Lieutenant, Major, or LTC); do not reject it solely because it is not a personal name. Likewise, a recognizable action-report or military/government organization acronym can be Yes without an expansion when its form itself supports that reading. Do not treat capitalization, a generic role, an arbitrary digit suffix, or mere familiarity with a product, company, or place as proof that this document uses it as a specific entity. A familiar ordinary word remains No unless the string supports a distinct named-entity reading. When the candidate alone leaves genuine ambiguity, reflect that uncertainty in the Yes probability.",
+      "criteria": {
+        "Yes": "The string gives meaningful lexical evidence of a particular person or office reference, organization, project, location, system, codeword, or other named institutional/operational entity; dataset-positive formal ranks/offices and recognizable entity acronyms are included.",
+        "No": "The string is ordinary prose, a generic role with no person/office-reference reading, a malformed or reference-number artifact, or only a globally recognizable product/place/person name whose use as a specific entity here cannot be established from the candidate alone."
+      }
+    },
+    "is_operationally_significant": {
+      "type": "choice",
+      "instructions": "Using only the candidate word, decide whether its own meaning denotes a consequential military, government, security, cyber, or other operational activity, force, command, campaign, raid, capability, vulnerability, plan, designated resource, unit, or operation. A domain-specific unit, force, organization, or mission acronym may be Yes even when its expansion is unavailable; do not require an acronym to be familiar before recognizing that it is an operational label. Include direct action/force terms such as campaign, commands, forces, and raid when used as operational concepts. Do not say Yes merely because a generic word is often found in military, security, or IT writing: broad domain words, generic adjectives, and generic verbs such as military, security, secure, attack, adversarial, risk, or scan are No by themselves unless the candidate string identifies a distinct operational concept, capability, or resource. If an operational interpretation depends on missing context, do not invent it; express the uncertainty in the Yes probability.",
+      "criteria": {
+        "Yes": "The candidate itself identifies a specific operational activity, campaign, force/command/unit, designated organization or resource, military/security/cyber capability or vulnerability, or a domain-specific operation/unit acronym.",
+        "No": "The candidate is generic everyday, management, IT, or security vocabulary, a broad domain descriptor, adjective, or action word whose operational significance depends on unavailable context, and does not itself identify a consequential operational concept."
+      }
+    },
+    "is_common_word": {
+      "type": "choice",
+      "instructions": "Independently decide whether the candidate is an established English lexical item; do not interpret common as meaning only one of the very highest-frequency/simple words. Answer Yes for standard dictionary words and recognizable inflected, derived, or technical English words, even when they are less frequent, long, capitalized, or used as a name in another signal. Evaluate the English word/component rather than penalizing capitalization or technical subject matter. Digits, indexes, or code-like material before or after a recognizable English word do not make that word uncommon (for example 001Version or CAPACITY26); assess the recognizable English component. Widely established everyday-professional terms may also be Yes even when they look like product or platform names. Answer No only when the candidate has no clear established English word/component and is primarily an invented token, non-lexical acronym, malformed form, or code/name. Do not let identifier or operational scores decide this signal; when an ordinary English lexical reading is clear, favor Yes.",
+      "criteria": {
+        "Yes": "The candidate is a standard English word, recognized inflected/derived or technical English form, or contains a recognizable established English word/component; capitalization, a name-like appearance, rarity, or attached digits do not by themselves make it No.",
+        "No": "The candidate is primarily an invented, malformed, or non-lexical acronym/code/name and has no clear established English lexical component."
+      }
+    }
+  },
+  "response_contract": {
+    "type": "choice",
+    "choices": [
+      "Yes",
+      "No"
+    ],
+    "include_probability_for_each_signal": true,
+    "decision_threshold": 0.5
+  },
+  "training_csv": {
+    "filename": "RAP_TTP_Procedure_Official_Closed_v1.0-draft09302100.docx.2a945e09.ollaya.csv",
+    "target_columns": [
+      "target_is_identifier",
+      "target_is_operationally_significant",
+      "target_is_common_word"
+    ],
+    "input_columns": [
+      "word"
+    ],
+    "context_column": null
+  },
+  "change_rationale": "The v002 threshold diagnostics showed 1,565 common-word false negatives versus only 6 false positives: ordinary English vocabulary, inflections/derivatives, and word-like terms were often kept just below 0.5, so v003 makes an established English lexical item the clear positive case and explicitly handles attached digits/components. Identifier errors were 9 false negatives and 75 false positives; v003 addresses the missed rank/office references and action-report or organization acronyms while retaining the requirement not to infer document use from capitalization or familiarity alone. Operational errors were 22 false negatives and 157 false positives; v003 calls out missed campaign/force/command/raid and acronym patterns while tightening the No case for generic domain-associated words and verbs. All three signals remain independent and the Yes/No threshold stays at 0.5. The source is word-only, so context-dependent target disagreements remain inherently limited by the input.",
+  "evaluation_provenance": {
+    "csv_sha256": "8dd49ddcbce42e5ae9dee3e26ef8bf35d6181e007b32e9fa52bedc0da0f4df84",
+    "csv_row_count": 3018,
+    "unique_word_count": 3018,
+    "duplicate_word_count": 0,
+    "target_semantics": "Targets may be fractional values in [0,1]. For the requested hard diagnostic, actual is target >= 0.5, predicted is score >= 0.5, and the predict_is_* correctness flag is true exactly when actual equals predicted. Blank scores are missing, not zero, and are excluded from correct/incorrect counts.",
+    "model_tag_for_next_evaluation": "von:1.1",
+    "baseline_request_version": "ollaya_request_v002",
+    "new_request_version": "ollaya_request_v003",
+    "evaluation_scope": "In-sample tuning comparison; no holdout or generalization claim.",
+    "target_support_at_0_5": {
+      "is_identifier": {
+        "positive": 27,
+        "negative": 2991
+      },
+      "is_operationally_significant": {
+        "positive": 56,
+        "negative": 2962
+      },
+      "is_common_word": {
+        "positive": 2954,
+        "negative": 64
+      }
+    },
+    "provided_result_files": {
+      "ollaya_request_v001": {
+        "filename": "RAP_TTP_Procedure_Official_Closed_v1.0-draft09302100.docx.2a945e09.ollaya.csv",
+        "sha256": "8dd49ddcbce42e5ae9dee3e26ef8bf35d6181e007b32e9fa52bedc0da0f4df84",
+        "rows": 3018,
+        "scored_rows_per_signal": 2858
+      },
+      "ollaya_request_v002": {
+        "filename": "RAP_TTP_Procedure_Official_Closed_v1.0-draft09302100.docx.2a945e09.ollaya(2).csv",
+        "sha256": "18253857eb4cd7c88a09c8a4b79d650545cf2bee1718b39c5cfe341cbdc0d562",
+        "rows": 3018,
+        "scored_rows_per_signal": 2858
+      }
+    },
+    "hard_threshold_metrics_from_provided_results": {
+      "ollaya_request_v001": {
+        "is_identifier": {
+          "correct_true_count": 2642,
+          "incorrect_false_count": 216,
+          "true_positive": 22,
+          "false_positive": 211,
+          "false_negative": 5,
+          "true_negative": 2620,
+          "missing": 160
+        },
+        "is_operationally_significant": {
+          "correct_true_count": 608,
+          "incorrect_false_count": 2250,
+          "true_positive": 49,
+          "false_positive": 2243,
+          "false_negative": 7,
+          "true_negative": 559,
+          "missing": 160
+        },
+        "is_common_word": {
+          "correct_true_count": 2456,
+          "incorrect_false_count": 402,
+          "true_positive": 2416,
+          "false_positive": 20,
+          "false_negative": 382,
+          "true_negative": 40,
+          "missing": 160
+        }
+      },
+      "ollaya_request_v002": {
+        "is_identifier": {
+          "correct_true_count": 2774,
+          "incorrect_false_count": 84,
+          "true_positive": 18,
+          "false_positive": 75,
+          "false_negative": 9,
+          "true_negative": 2756,
+          "missing": 160
+        },
+        "is_operationally_significant": {
+          "correct_true_count": 2679,
+          "incorrect_false_count": 179,
+          "true_positive": 34,
+          "false_positive": 157,
+          "false_negative": 22,
+          "true_negative": 2645,
+          "missing": 160
+        },
+        "is_common_word": {
+          "correct_true_count": 1287,
+          "incorrect_false_count": 1571,
+          "true_positive": 1233,
+          "false_positive": 6,
+          "false_negative": 1565,
+          "true_negative": 54,
+          "missing": 160
+        }
+      }
+    },
+    "v002_error_patterns_used_for_v003": [
+      "Identifier: false negatives included formal rank/office terms (Colonel, Commander, Lieutenant, Major, LTC), government references, and action-report or organization acronyms (AARs, CONOPS). False positives concentrated on recognizable products/platforms, companies, places/people, and arbitrary acronym/digit-style tokens without candidate-only evidence of document use.",
+      "Operational significance: false negatives included military/government acronyms and unit/force/command or mission concepts (including AETHER, CapDev, DXO, PPCoE, XBD/XWB, campaign, commands, forces, and raid). False positives were broad generic domain-associated vocabulary, including security/IT descriptors and generic verbs/adjectives such as secure, attack, adversarial, risk, and scan.",
+      "Common word: 1,565 false negatives versus 6 false positives. Misses clustered on recognizable English words and inflections/derivatives, including many scores in the 0.25-0.50 range, plus tokens with attached numeric/index material; v003 favors an established English lexical reading. The small false-positive set appears context-sensitive and is not used to suppress the much larger positive class."
+    ],
+    "comparison_caveats": [
+      "Each supplied file has 3,018 rows and 160 rows with all three score fields blank; these are reported as missing and not counted as predict_is_* true or false. All 160 missing rows have target_is_common_word >= 0.5.",
+      "The v001 and v002 word sets differ only by TRUE versus true; target values are unchanged. The files do not contain request/model metadata, so the supplied comparison is thresholded result-file analysis, not a confirmed same-model prompt-only comparison.",
+      "The next evaluation uses the model tag currently configured in .env (von:1.1) and candidate-only input. Any resulting metrics remain in-sample."
+    ],
+    "comparison_status": "v003 snapshot created from supplied v001/v002 threshold errors; v003 local CLI scoring and comparison are pending."
+  }
+}

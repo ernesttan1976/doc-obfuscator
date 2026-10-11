@@ -277,19 +277,14 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog, mo
     assert set(questions) == {
         "is_identifier", "is_operationally_significant", "is_common_word"
     }
-    identifier_prompt = questions["is_identifier"]["instructions"]
-    assert "ordinary English word" in identifier_prompt
-    assert "'abandon'" in identifier_prompt
-    assert "capitalized" in identifier_prompt
-    assert "clearly uses it to name" in identifier_prompt
-    assert "'adapt'" in questions["is_common_word"]["instructions"]
+    assert questions == _QUESTIONS
     assert "Private Project" not in " ".join(captured["command"])
     assert json.loads(captured["input"]) == {
         "candidate": "Private Project",
         "context": "Private context phrase",
     }
     assert result["redactionConfidence"] == 0.7
-    assert result["ollayaRequestVersion"] == "ollaya_request_v001"
+    assert result["ollayaRequestVersion"] == OLLAYA_REQUEST_VERSION
     assert captured["timeout"] == 60
     records = [record for record in caplog.records if getattr(record, "ollaya_event", None) == "candidate_scoring_call"]
     assert len(records) == 1
@@ -299,7 +294,7 @@ def test_local_cli_receives_and_logs_request_and_response_as_one_line(caplog, mo
     log_line = records[0].getMessage()
     log_entry = json.loads(log_line)
     assert "\n" not in log_line
-    assert log_entry["request"]["version"] == "ollaya_request_v001"
+    assert log_entry["request"]["version"] == OLLAYA_REQUEST_VERSION
     assert log_entry["request"]["state"] == {
         "candidate": "Private Project",
         "context": "Private context phrase",
